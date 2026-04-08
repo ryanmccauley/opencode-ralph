@@ -8,9 +8,26 @@ import { homedir } from "os";
 
 const OC_AGENTS_DIR = join(homedir(), ".config", "opencode", "agents");
 
-/** Find the ralph.md agent file relative to the binary/script */
-function findAgentFile(): string {
-  // Check next to the entry point first
+// ─── Embedded default agent body ──────────────────────────────────────────────
+// This is the content of ralph.md (after the frontmatter) compiled into the
+// binary so the tool works even when ralph.md isn't on disk.  An external
+// ralph.md file, if found, will override this default.
+const DEFAULT_AGENT_BODY = `
+You are a fully autonomous coding agent.
+
+## Autonomy Rules (CRITICAL)
+
+- Work autonomously. Do NOT stop to ask for user confirmation or feedback.
+- Do NOT pause to summarize progress or ask "should I continue?" or "would you like me to proceed?"
+- After completing one step, IMMEDIATELY move to the next.
+- Keep working in a loop until the specified outcome is fully achieved.
+- Only stop when the task is COMPLETE or you are genuinely stuck on something that requires human input.
+- If you encounter an error, attempt to fix it yourself before asking for help.
+- Re-verify your work after making changes. Run tests, builds, or whatever is appropriate to confirm the fix.
+- When the task is fully complete and verified, you MUST output \`<ralph>DONE</ralph>\` as the very last line of your final message. This signals that you are finished. Do NOT output this token until the task is truly done.`;
+
+/** Try to find an external ralph.md agent file; returns null if not found */
+function findAgentFile(): string | null {
   const scriptDir = dirname(Bun.main);
   const candidates = [
     join(scriptDir, "ralph.md"),
@@ -25,9 +42,7 @@ function findAgentFile(): string {
       continue;
     }
   }
-  throw new Error(
-    "Could not find ralph.md agent file. Place it next to the ralph binary."
-  );
+  return null;
 }
 
 /** Extract the markdown body from ralph.md (everything after the second ---) */
@@ -46,6 +61,18 @@ function extractAgentBody(agentFile: string): string {
     }
   }
   return bodyLines.join("\n");
+}
+
+/**
+ * Get the agent body text: use an external ralph.md if available,
+ * otherwise fall back to the embedded default.
+ */
+function getAgentBody(): string {
+  const externalFile = findAgentFile();
+  if (externalFile) {
+    return extractAgentBody(externalFile);
+  }
+  return DEFAULT_AGENT_BODY;
 }
 
 /**
@@ -134,8 +161,7 @@ export function setupAgent(
     return { agentName: "ralph", tmpFile: null };
   }
 
-  const agentFile = findAgentFile();
-  const body = extractAgentBody(agentFile);
+  const body = getAgentBody();
   const tmpName = `ralph-tmp-${process.pid}`;
 
   mkdirSync(OC_AGENTS_DIR, { recursive: true });
