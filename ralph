@@ -19,7 +19,10 @@ SESSIONS_DIR="$RALPH_DIR/sessions"
 CONFIG_FILE="$RALPH_DIR/config"
 OC_AGENTS_DIR="$HOME/.config/opencode/agents"
 DONE_TOKEN="<ralph>DONE</ralph>"
-GREEN="#00E540"
+CLR="#FFFFFF"
+DIM="#666666"
+ACCENT="#88AAFF"
+SUBTLE="#444444"
 
 # Globals set by load_config / CLI flags
 DEFAULT_MODEL="${RALPH_MODEL:-}"
@@ -224,7 +227,7 @@ YAML
 description: Autonomous agent that works until the task is fully complete, narrated in Ralph Wiggum's voice
 mode: primary
 temperature: 0.7
-color: "$GREEN"
+color: "$CLR"
 $thinking_yaml
 permission:
   edit: allow
@@ -278,15 +281,15 @@ _session_line() {
 
   local icon
   case "$status" in
-    complete)   icon="+" ;;
-    incomplete) icon="~" ;;
-    *)          icon="x" ;;
+    complete)   icon="·" ;;
+    incomplete) icon="○" ;;
+    *)          icon="×" ;;
   esac
 
   local short="${prompt:0:40}"
   [[ ${#prompt} -gt 40 ]] && short="${short}..."
 
-  echo "$icon $ts | $model | T:$thinking | $short"
+  echo "$icon $ts  $model  $short"
 }
 
 # ─── Core Run Loop ─────────────────────────────────────────────────────────────
@@ -305,9 +308,9 @@ run_session() {
   setup_agent "$model" "$thinking"
 
   echo ""
-  echo "  Model:    $model"
-  echo "  Thinking: $thinking"
-  echo "  Max iter: $max_iter"
+  echo "  model:    $model"
+  echo "  thinking: $thinking"
+  echo "  max iter: $max_iter"
   echo ""
 
   local iterations=0
@@ -317,9 +320,7 @@ run_session() {
     iterations=$i
 
     echo ""
-    echo "========================================"
-    echo "[ralph] iteration $i / $max_iter"
-    echo "========================================"
+    echo "── iteration $i / $max_iter ──"
     echo ""
 
     local iter_prompt
@@ -337,26 +338,22 @@ run_session() {
     if echo "$output" | grep -qF "$DONE_TOKEN"; then
       status="complete"
       echo ""
-      echo "========================================"
-      echo "[ralph] Task complete on iteration $i."
-      echo "========================================"
+      echo "── complete (iteration $i) ──"
       break
     fi
   done
 
   if [[ "$status" != "complete" ]]; then
     echo ""
-    echo "========================================"
-    echo "[ralph] Hit max iterations ($max_iter) without completion token."
-    echo "[ralph] The agent may not have finished. Re-run or increase --max-iter."
-    echo "========================================"
+    echo "── max iterations ($max_iter) reached ──"
+    echo "   the agent may not have finished. re-run or increase --max-iter."
   fi
 
   save_session_meta "$session_id" "$model" "$thinking" "$max_iter" "$prompt" "$status" "$iterations"
   _cleanup_tmp_agent
 
   echo ""
-  echo "[ralph] Session saved: $session_id"
+  echo "  session saved: $session_id"
 }
 
 # ─── Model Selection (TUI helper) ──────────────────────────────────────────────
@@ -373,10 +370,19 @@ _select_model() {
   models=$(echo "$raw" | grep -oE '[a-zA-Z0-9_-]+/[a-zA-Z0-9._-]+' | sort -u || true)
 
   if [[ -n "$models" ]]; then
-    echo "$models" | gum filter --placeholder "Type to search models..." --height 15 --value "$current"
+    echo "$models" | gum filter \
+      --fuzzy \
+      --placeholder "Type to search models…" \
+      --height 15 \
+      --value "$current" \
+      --indicator.foreground "$ACCENT" \
+      --match.foreground "$ACCENT" \
+      --prompt.foreground "$DIM" \
+      --text.foreground "$CLR"
   else
     gum input --placeholder "provider/model-id (e.g. anthropic/claude-sonnet-4-20250514)" \
-      --value "$current" --prompt "> "
+      --value "$current" --prompt "  ❯ " \
+      --prompt.foreground "$ACCENT"
   fi
 }
 
@@ -384,34 +390,32 @@ _select_model() {
 
 _show_banner() {
   gum style \
-    --foreground "$GREEN" --bold \
-    --align center --width 44 \
-    --margin "1 0" --padding "0 1" \
-    '╔════════════════════════════════════════╗' \
-    '║                                        ║' \
-    '║              R A L P H                 ║' \
-    '║          "Im helping!"                 ║' \
-    '║                                        ║' \
-    '╚════════════════════════════════════════╝'
+    --foreground "$CLR" --bold \
+    --align center --width 50 \
+    --margin "1 2" --padding "0 2" \
+    '' \
+    '  r a l p h' \
+    ''
 }
 
 _new_session_ui() {
   # 1. Model
   echo ""
-  gum style --foreground "$GREEN" --bold "  Select a model"
+  gum style --foreground "$ACCENT" --bold "  Model"
   local model
   model=$(_select_model "${DEFAULT_MODEL:-}") || return
   if [[ -z "$model" ]]; then
-    gum style --foreground 196 "  No model selected."
+    gum style --foreground "$DIM" "  No model selected."
     sleep 1
     return
   fi
 
   # 2. Thinking
   echo ""
-  gum style --foreground "$GREEN" --bold "  Select thinking level"
+  gum style --foreground "$ACCENT" --bold "  Thinking"
   local thinking
   thinking=$(gum choose --selected "${DEFAULT_THINKING:-off}" \
+    --cursor.foreground "$ACCENT" \
     "off" "low" "high" "max") || return
 
   # 3. Max iterations
@@ -419,17 +423,18 @@ _new_session_ui() {
   local max_iter
   max_iter=$(gum input --placeholder "50" \
     --value "${DEFAULT_MAX_ITER:-50}" \
-    --prompt "Max iterations: " --width 20) || return
+    --prompt "  Max iterations: " --width 30 \
+    --prompt.foreground "$ACCENT") || return
   max_iter="${max_iter:-50}"
 
   # 4. Prompt
   echo ""
-  gum style --foreground "$GREEN" --bold "  Enter your prompt"
+  gum style --foreground "$ACCENT" --bold "  Prompt"
   local prompt
   prompt=$(gum write --placeholder "What should Ralph work on?" \
-    --char-limit 0 --width 80 --height 6) || return
+    --char-limit 0 --width 100 --height 6) || return
   if [[ -z "$prompt" ]]; then
-    gum style --foreground 196 "  No prompt entered."
+    gum style --foreground "$DIM" "  No prompt entered."
     sleep 1
     return
   fi
@@ -437,17 +442,17 @@ _new_session_ui() {
   # 5. Confirm
   echo ""
   gum style \
-    --border double --border-foreground "$GREEN" \
-    --padding "0 1" --margin "0 2" \
-    "Model:      $model" \
-    "Thinking:   $thinking" \
-    "Max iter:   $max_iter" \
+    --border rounded --border-foreground "$SUBTLE" \
+    --padding "1 2" --margin "0 2" --width 100 \
+    "  Model       $model" \
+    "  Thinking    $thinking" \
+    "  Max iter    $max_iter" \
     "" \
-    "Prompt:" \
-    "$prompt"
+    "  Prompt" \
+    "  $prompt"
   echo ""
 
-  if ! gum confirm "Start session?"; then
+  if ! gum confirm --prompt.foreground "$ACCENT" "Start session?"; then
     return
   fi
 
@@ -459,7 +464,7 @@ _new_session_ui() {
 
 _sessions_ui() {
   if [[ ! -d "$SESSIONS_DIR" ]]; then
-    gum style --foreground 208 "  No sessions yet."
+    gum style --foreground "$DIM" "  No sessions yet."
     sleep 1.5
     return
   fi
@@ -470,7 +475,7 @@ _sessions_ui() {
   done < <(ls -t "$SESSIONS_DIR"/*.meta 2>/dev/null || true)
 
   if [[ ${#metas[@]} -eq 0 ]]; then
-    gum style --foreground 208 "  No sessions yet."
+    gum style --foreground "$DIM" "  No sessions yet."
     sleep 1.5
     return
   fi
@@ -483,7 +488,13 @@ _sessions_ui() {
 
   local selected
   selected=$(printf '%s\n' "${lines[@]}" \
-    | gum filter --placeholder "Search sessions..." --height 15) || return
+    | gum filter \
+      --fuzzy \
+      --placeholder "Search sessions…" \
+      --height 15 \
+      --indicator.foreground "$ACCENT" \
+      --match.foreground "$ACCENT" \
+      --prompt.foreground "$DIM") || return
 
   # Extract the timestamp from the selected line (second field)
   local ts
@@ -493,30 +504,32 @@ _sessions_ui() {
   local log_file="$SESSIONS_DIR/${ts}.log"
 
   if [[ ! -f "$meta_file" ]]; then
-    gum style --foreground 196 "  Session not found."
+    gum style --foreground "$DIM" "  Session not found."
     sleep 1
     return
   fi
 
   # Show meta and offer actions
   echo ""
-  gum style --border normal --border-foreground "$GREEN" --padding "0 1" \
+  gum style --border rounded --border-foreground "$SUBTLE" --padding "1 2" \
     "$(cat "$meta_file")"
   echo ""
 
   local action
-  action=$(gum choose "View log" "Re-run (same settings)" "Back") || return
+  action=$(gum choose \
+    --cursor.foreground "$ACCENT" \
+    "view log" "re-run (same settings)" "back") || return
 
   case "$action" in
-    "View log")
+    "view log")
       if [[ -f "$log_file" ]]; then
         gum pager < "$log_file"
       else
-        gum style --foreground 208 "  No log file for this session."
+        gum style --foreground "$DIM" "  No log file for this session."
         sleep 1
       fi
       ;;
-    "Re-run"*)
+    "re-run"*)
       local model thinking max_iter prompt
       model=$(grep '^model=' "$meta_file" | cut -d= -f2)
       thinking=$(grep '^thinking=' "$meta_file" | cut -d= -f2)
@@ -534,11 +547,12 @@ _sessions_ui() {
 _settings_ui() {
   while true; do
     clear
-    gum style --foreground "$GREEN" --bold --margin "1 0" "  Settings"
+    gum style --foreground "$ACCENT" --bold --margin "1 2" "  Settings"
     echo ""
 
     local choice
     choice=$(gum choose \
+      --cursor.foreground "$ACCENT" \
       "Default model:          ${DEFAULT_MODEL:-<not set>}" \
       "Default thinking:       $DEFAULT_THINKING" \
       "Default max iterations: $DEFAULT_MAX_ITER" \
@@ -551,16 +565,18 @@ _settings_ui() {
         ;;
       "Default thinking"*)
         DEFAULT_THINKING=$(gum choose --selected "$DEFAULT_THINKING" \
+          --cursor.foreground "$ACCENT" \
           "off" "low" "high" "max") || true
         ;;
       "Default max"*)
         DEFAULT_MAX_ITER=$(gum input --placeholder "50" \
-          --value "$DEFAULT_MAX_ITER" --prompt "Max iterations: ") || true
+          --value "$DEFAULT_MAX_ITER" --prompt "  Max iterations: " \
+          --prompt.foreground "$ACCENT") || true
         ;;
       "Save & back")
         save_config
         echo ""
-        gum style --foreground "$GREEN" "  Settings saved to $CONFIG_FILE"
+        gum style --foreground "$ACCENT" "  Saved to $CONFIG_FILE"
         sleep 1
         return
         ;;
@@ -578,16 +594,17 @@ _menu_loop() {
 
     local choice
     choice=$(gum choose \
-      "New Session" \
-      "Recent Sessions" \
+      --cursor.foreground "$ACCENT" \
+      "New session" \
+      "Recent sessions" \
       "Settings" \
       "Quit") || exit 0
 
     case "$choice" in
-      "New Session")      _new_session_ui ;;
-      "Recent Sessions")  _sessions_ui ;;
-      "Settings")         _settings_ui ;;
-      "Quit")             exit 0 ;;
+      "New session")       _new_session_ui ;;
+      "Recent sessions")   _sessions_ui ;;
+      "Settings")          _settings_ui ;;
+      "Quit")              exit 0 ;;
     esac
   done
 }
