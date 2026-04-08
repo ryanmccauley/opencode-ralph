@@ -4,18 +4,27 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AGENT_FILE="$SCRIPT_DIR/ralph.md"
 
+DONE_TOKEN="<ralph>DONE</ralph>"
+
 usage() {
   echo "Usage: ralph [options] <prompt>"
   echo ""
   echo "Run OpenCode with the Ralph Wiggum autonomous agent."
   echo ""
+  echo "Ralph loops automatically, re-invoking the agent until it outputs"
+  echo "the completion token ($DONE_TOKEN) or hits the max iteration limit."
+  echo ""
   echo "Options:"
-  echo "  -m, --model <provider/model>   Model to use (or set RALPH_MODEL env var)"
-  echo "  -h, --help                     Show this help message"
+  echo "  -m, --model <provider/model>      Model to use (or set RALPH_MODEL env var)"
+  echo "  --max-iter <n>                     Max loop iterations (default: 50, or RALPH_MAX_ITER)"
+  echo "  --once                             Run once without looping (single invocation)"
+  echo "  -h, --help                         Show this help message"
   echo ""
   echo "Examples:"
   echo "  ralph \"Fix all failing E2E tests until they pass\""
   echo "  ralph -m anthropic/claude-sonnet-4-20250514 \"Refactor the auth module\""
+  echo "  ralph --max-iter 5 \"Add input validation to the API\""
+  echo "  ralph --once \"Explain the auth flow\""
   echo "  RALPH_MODEL=openai/gpt-4.1 ralph \"Add unit tests for the API layer\""
   echo ""
   echo "Setup:"
@@ -25,6 +34,8 @@ usage() {
 }
 
 MODEL="${RALPH_MODEL:-}"
+MAX_ITER="${RALPH_MAX_ITER:-50}"
+ONCE=false
 PROMPT=""
 
 while [[ $# -gt 0 ]]; do
@@ -32,6 +43,14 @@ while [[ $# -gt 0 ]]; do
     -m|--model)
       MODEL="$2"
       shift 2
+      ;;
+    --max-iter)
+      MAX_ITER="$2"
+      shift 2
+      ;;
+    --once)
+      ONCE=true
+      shift
       ;;
     -h|--help)
       usage
@@ -64,4 +83,42 @@ if [ -z "$MODEL" ]; then
   fi
 fi
 
-exec opencode run --agent ralph --model "$MODEL" "$PROMPT"
+# Single-run mode: no loop, just exec
+if [ "$ONCE" = true ]; then
+  exec opencode run --agent ralph --model "$MODEL" "$PROMPT"
+fi
+
+# Loop mode: keep re-invoking until the agent signals completion
+for i in $(seq 1 "$MAX_ITER"); do
+  echo ""
+  echo "========================================"
+  echo "[ralph] iteration $i / $MAX_ITER"
+  echo "========================================"
+  echo ""
+
+  # Build the prompt: on iteration 2+ tell the agent to continue
+  if [ "$i" -eq 1 ]; then
+    ITER_PROMPT="$PROMPT"
+  else
+    ITER_PROMPT="Continue working on the following task. Check the current state of the codebase and pick up where you left off: $PROMPT"
+  fi
+
+  # Run the agent, stream output to terminal and capture it for token detection
+  OUTPUT=$(opencode run --agent ralph --model "$MODEL" "$ITER_PROMPT" 2>&1 | tee /dev/tty) || true
+
+  # Check for the completion token
+  if echo "$OUTPUT" | grep -qF "$DONE_TOKEN"; then
+    echo ""
+    echo "========================================"
+    echo "[ralph] Task complete on iteration $i."
+    echo "========================================"
+    exit 0
+  fi
+done
+
+echo ""
+echo "========================================"
+echo "[ralph] Hit max iterations ($MAX_ITER) without completion token."
+echo "[ralph] The agent may not have finished. Re-run or increase --max-iter."
+echo "========================================"
+exit 1

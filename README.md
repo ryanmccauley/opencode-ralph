@@ -8,6 +8,7 @@ An [OpenCode](https://opencode.ai) agent that works autonomously until the task 
 
 Ralph is a custom OpenCode agent that solves the "stops after each step" problem. It:
 
+- **Loops autonomously** -- the wrapper script re-invokes the agent until it signals completion with `<ralph>DONE</ralph>`
 - **Keeps going** until the task is complete instead of pausing for confirmation
 - **Runs tests, fixes errors, re-runs** in a loop without asking "should I continue?"
 - **Narrates everything** in Ralph Wiggum's voice
@@ -52,13 +53,27 @@ opencode run --agent ralph --model anthropic/claude-sonnet-4-20250514 "Fix all f
 
 ### With the wrapper script
 
+The wrapper script loops automatically, re-invoking the agent until it outputs the completion token or hits the iteration limit.
+
 ```bash
 ralph -m anthropic/claude-sonnet-4-20250514 "Fix all failing tests"
 
 # Or set a default model
 export RALPH_MODEL="anthropic/claude-sonnet-4-20250514"
 ralph "Refactor the auth module"
+
+# Limit iterations
+ralph --max-iter 5 "Add input validation to the API"
+
+# Single run, no loop (like the old behavior)
+ralph --once "Explain the auth flow"
 ```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-m, --model` | `$RALPH_MODEL` | Model to use (provider/model-id) |
+| `--max-iter` | `50` (or `$RALPH_MAX_ITER`) | Maximum loop iterations before giving up |
+| `--once` | off | Run once without looping (single invocation) |
 
 To see available models:
 
@@ -66,6 +81,18 @@ To see available models:
 opencode models
 opencode models anthropic   # filter by provider
 ```
+
+## How the loop works
+
+Each `opencode run` invocation is a fresh session. The `ralph` wrapper script handles persistence across sessions:
+
+1. **Iteration 1**: Sends your original prompt to the agent
+2. **Iteration 2+**: Sends `"Continue working on the following task. Check the current state of the codebase and pick up where you left off: <original prompt>"`
+3. **After each iteration**: Checks the agent's output for `<ralph>DONE</ralph>`
+4. **If found**: Exits successfully
+5. **If not found**: Starts the next iteration (up to `--max-iter`)
+
+The completion token is defined in both `ralph.md` (so the agent knows to output it) and the wrapper script (so the script knows to look for it).
 
 ## Permissions
 
