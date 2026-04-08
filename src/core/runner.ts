@@ -1,46 +1,17 @@
 // ─── Session Runner ───────────────────────────────────────────────────────────
 // Runs the opencode agent loop, detects done token, logs output.
 
-import { mkdirSync, existsSync } from "fs";
-import { homedir } from "os";
-import { join } from "path";
+import { mkdirSync } from "fs";
 import { setupAgent, cleanupAgent } from "./agent.js";
+import { findOpencodeBin } from "./opencode.js";
 import {
   generateSessionId,
   saveSessionMeta,
   getLogPath,
 } from "./sessions.js";
-import { SESSIONS_DIR } from "./config.js";
-import type { ModelInfo } from "../types.js";
+import { getSessionsDir } from "./config.js";
 import { DONE_TOKEN } from "../types.js";
-
-/**
- * Find the opencode binary. Checks common locations.
- */
-export async function findOpencodeBin(): Promise<string> {
-  // Check PATH first
-  const pathDirs = (process.env.PATH ?? "").split(":");
-  for (const dir of pathDirs) {
-    const candidate = join(dir, "opencode");
-    if (existsSync(candidate)) return candidate;
-  }
-
-  // Check well-known locations
-  const candidates = [
-    join(homedir(), ".opencode", "bin", "opencode"),
-    join(homedir(), ".local", "bin", "opencode"),
-    join(homedir(), "go", "bin", "opencode"),
-    "/usr/local/bin/opencode",
-  ];
-
-  for (const c of candidates) {
-    if (existsSync(c)) return c;
-  }
-
-  throw new Error(
-    "Could not find opencode binary. Install it or add it to your PATH."
-  );
-}
+import { StatusBar, canShowStatusBar } from "../tui/status-bar.js";
 
 export interface RunOptions {
   model: string;
@@ -50,6 +21,17 @@ export interface RunOptions {
   prompt: string;
   /** Raw variant config object to pass into the agent YAML, or null for no thinking */
   variantConfig?: Record<string, unknown> | null;
+  /** Whether to show the floating status bar (default: true). */
+  showStatusBar?: boolean;
+
+  // ─── Resume fields ──────────────────────────────────────────────────────
+  /** Existing session ID to resume. When set, reuses the session's log and
+   *  metadata instead of creating new ones. */
+  resumeSessionId?: string;
+  /** The iteration count from the previous run. The loop starts at
+   *  `resumeFromIteration + 1` and always uses the continuation prompt. */
+  resumeFromIteration?: number;
+
   /** Called before each iteration */
   onIteration?: (current: number, max: number) => void;
   /** Called when session completes */
@@ -58,76 +40,191 @@ export interface RunOptions {
   onMaxReached?: (max: number) => void;
 }
 
+export interface StatusBarLike {
+  start(): void;
+  stop(): void;
+  setIteration(current: number): void;
+  write(text: string): void;
+}
+
+type RunOpencodeFn = (
+  bin: string,
+  agentName: string,
+  model: string,
+  prompt: string,
+  logPath: string,
+  write: (text: string) => void
+) => Promise<string>;
+
+export interface RunnerDeps {
+  setupAgent: typeof setupAgent;
+  cleanupAgent: typeof cleanupAgent;
+  findOpencodeBin: typeof findOpencodeBin;
+  generateSessionId: typeof generateSessionId;
+  saveSessionMeta: typeof saveSessionMeta;
+  getLogPath: typeof getLogPath;
+  getSessionsDir: typeof getSessionsDir;
+  canShowStatusBar: () => boolean;
+  createStatusBar: (opts: {
+    model: string;
+    thinking: string;
+    maxIter: number;
+  }) => StatusBarLike;
+  runOpencode: RunOpencodeFn;
+  mkdirSync: typeof mkdirSync;
+  writeStdout: (text: string) => void;
+  log: (text: string) => void;
+}
+
+const DEFAULT_RUNNER_DEPS: RunnerDeps = {
+  setupAgent,
+  cleanupAgent,
+  findOpencodeBin,
+  generateSessionId,
+  saveSessionMeta,
+  getLogPath,
+  getSessionsDir,
+  canShowStatusBar,
+  createStatusBar(opts) {
+    return new StatusBar(opts);
+  },
+  runOpencode,
+  mkdirSync,
+  writeStdout(text) {
+    process.stdout.write(text);
+  },
+  log(text) {
+    console.log(text);
+  },
+};
+
 /**
  * Run an agent session. Works in both TUI and CLI mode.
+ *
+ * When `resumeSessionId` is set, the runner continues an existing session:
+ * - Reuses the session ID and log file (appending)
+ * - Starts the loop counter from `resumeFromIteration + 1`
+ * - Always uses the continuation prompt
+ * - Updates the existing session metadata when done
  */
 export async function runSession(opts: RunOptions): Promise<void> {
+  const deps = DEFAULT_RUNNER_DEPS;
+  await runSessionWithDeps(opts, deps);
+}
+
+/**
+ * Internal dependency-injected runner used by tests.
+ * Production callers should use runSession().
+ */
+export async function runSessionWithDeps(
+  opts: RunOptions,
+  depOverrides: Partial<RunnerDeps>
+): Promise<void> {
+  const deps: RunnerDeps = { ...DEFAULT_RUNNER_DEPS, ...depOverrides };
   const { model, thinking, maxIter, prompt, variantConfig } = opts;
 
-  const sessionId = generateSessionId();
-  const logPath = getLogPath(sessionId);
-  mkdirSync(SESSIONS_DIR, { recursive: true });
+  const isResume = !!opts.resumeSessionId;
+  const iterOffset = isResume ? (opts.resumeFromIteration ?? 0) : 0;
+  const sessionId = isResume ? opts.resumeSessionId! : deps.generateSessionId();
+  const logPath = deps.getLogPath(sessionId);
+  deps.mkdirSync(deps.getSessionsDir(), { recursive: true });
 
-  const agent = setupAgent(variantConfig ?? null);
-  const opencodeBin = await findOpencodeBin();
+  const useStatusBar = (opts.showStatusBar ?? true) && deps.canShowStatusBar();
 
-  let iterations = 0;
+  const agent = deps.setupAgent(variantConfig ?? null);
+  const opencodeBin = await deps.findOpencodeBin();
+
+  // The status bar shows total iteration numbers so the user knows
+  // where they are overall (e.g. iter 51/70 when resuming from 50 with 20 more).
+  const totalMax = iterOffset + maxIter;
+  let bar: StatusBarLike | null = null;
+  if (useStatusBar) {
+    bar = deps.createStatusBar({ model, thinking, maxIter: totalMax });
+    bar.start();
+  }
+
+  let iterations = iterOffset;
   let status: "complete" | "incomplete" = "incomplete";
+
+  // Writer function — routes output through the status bar if active
+  const writeOutput = bar
+    ? (text: string) => bar!.write(text)
+    : (text: string) => {
+        deps.writeStdout(text);
+      };
 
   try {
     for (let i = 1; i <= maxIter; i++) {
-      iterations = i;
-      opts.onIteration?.(i, maxIter);
+      const totalIter = iterOffset + i;
+      iterations = totalIter;
 
+      if (bar) {
+        bar.setIteration(totalIter);
+      }
+      opts.onIteration?.(totalIter, totalMax);
+
+      // When resuming, every iteration is a continuation (the original
+      // prompt was already sent in the first run). For new sessions,
+      // only iteration 1 sends the raw prompt.
       const iterPrompt =
-        i === 1
+        !isResume && i === 1
           ? prompt
           : `Continue working on the following task. Check the current state of the codebase and pick up where you left off: ${prompt}`;
 
-      const output = await runOpencode(
+      const output = await deps.runOpencode(
         opencodeBin,
         agent.agentName,
         model,
         iterPrompt,
-        logPath
+        logPath,
+        writeOutput
       );
 
       if (output.includes(DONE_TOKEN)) {
         status = "complete";
-        opts.onComplete?.(i);
+        bar?.stop();
+        bar = null;
+        opts.onComplete?.(totalIter);
         break;
       }
     }
 
     if (status !== "complete") {
-      opts.onMaxReached?.(maxIter);
+      bar?.stop();
+      bar = null;
+      opts.onMaxReached?.(totalMax);
     }
   } finally {
-    cleanupAgent(agent);
+    bar?.stop();
+    deps.cleanupAgent(agent);
   }
 
-  await saveSessionMeta({
+  // Save (or update) session metadata
+  await deps.saveSessionMeta({
     timestamp: sessionId,
     model,
     thinking,
-    maxIter,
+    maxIter: totalMax,
     prompt,
     status,
     iterations,
   });
 
-  console.log(`\n  session saved: ${sessionId}`);
+  deps.log(`\n  session saved: ${sessionId}`);
 }
 
 /**
- * Run a single opencode invocation. Streams output to stdout and log file.
+ * Run a single opencode invocation. Streams output through the provided
+ * writer function and appends to a log file. Throws if the subprocess
+ * exits with a non-zero code.
  */
 async function runOpencode(
   bin: string,
   agentName: string,
   model: string,
   prompt: string,
-  logPath: string
+  logPath: string,
+  write: (text: string) => void
 ): Promise<string> {
   const proc = Bun.spawn(
     [bin, "run", "--agent", agentName, "--model", model, prompt],
@@ -140,24 +237,26 @@ async function runOpencode(
   let output = "";
   const decoder = new TextDecoder();
   const reader = proc.stdout.getReader();
-  const logFile = Bun.file(logPath);
 
-  // Stream output to both stdout and log
-  const chunks: string[] = [];
+  // Open the log file for appending
+  const logFd = Bun.file(logPath).writer();
+
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
     const text = decoder.decode(value);
     output += text;
-    chunks.push(text);
-    process.stdout.write(text);
+    write(text);
+    logFd.write(text);
   }
 
-  // Append to log file
-  const existingLog = (await logFile.exists()) ? await logFile.text() : "";
-  await Bun.write(logPath, existingLog + chunks.join(""));
+  logFd.end();
 
-  await proc.exited;
+  const exitCode = await proc.exited;
+  if (exitCode !== 0) {
+    throw new Error(`opencode exited with code ${exitCode}`);
+  }
+
   return output;
 }
 
@@ -166,7 +265,6 @@ async function runOpencode(
  */
 export async function runOnce(
   model: string,
-  thinking: string,
   prompt: string,
   variantConfig?: Record<string, unknown> | null
 ): Promise<void> {
@@ -181,7 +279,11 @@ export async function runOnce(
         stderr: "inherit",
       }
     );
-    await proc.exited;
+
+    const exitCode = await proc.exited;
+    if (exitCode !== 0) {
+      throw new Error(`opencode exited with code ${exitCode}`);
+    }
   } finally {
     cleanupAgent(agent);
   }

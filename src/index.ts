@@ -4,9 +4,16 @@
 
 import * as p from "@clack/prompts";
 import { loadConfig } from "./core/config.js";
-import { fetchModels, getModels, createModelSearcher, searchModels } from "./core/models.js";
+import { getModels, createModelSearcher } from "./core/models.js";
+import { findOpencodeBin } from "./core/opencode.js";
 import { runSession, runOnce } from "./core/runner.js";
+import { getSessionMeta } from "./core/sessions.js";
 import { menuLoop } from "./tui/menu.js";
+import {
+  selectModel,
+  createRunCallbacks,
+  parsePositiveInt,
+} from "./tui/helpers.js";
 import type { ModelInfo } from "./types.js";
 
 // ─── CLI Parsing ──────────────────────────────────────────────────────────────
@@ -19,6 +26,8 @@ interface CliArgs {
   once: boolean;
   tui: boolean;
   refresh: boolean;
+  noStatus: boolean;
+  resume: string;
   help: boolean;
   prompt: string;
 }
@@ -27,10 +36,12 @@ function parseArgs(argv: string[]): CliArgs {
   const args: CliArgs = {
     model: process.env.RALPH_MODEL ?? "",
     thinking: "off",
-    maxIter: parseInt(process.env.RALPH_MAX_ITER ?? "50", 10) || 50,
+    maxIter: parsePositiveInt(process.env.RALPH_MAX_ITER ?? "", 50),
     once: false,
     tui: false,
     refresh: false,
+    noStatus: false,
+    resume: "",
     help: false,
     prompt: "",
   };
@@ -50,13 +61,19 @@ function parseArgs(argv: string[]): CliArgs {
         args.thinking = rest[++i] ?? "off";
         break;
       case "--max-iter":
-        args.maxIter = parseInt(rest[++i] ?? "50", 10) || 50;
+        args.maxIter = parsePositiveInt(rest[++i] ?? "", 50);
         break;
       case "--once":
         args.once = true;
         break;
       case "--refresh":
         args.refresh = true;
+        break;
+      case "--no-status":
+        args.noStatus = true;
+        break;
+      case "--resume":
+        args.resume = rest[++i] ?? "";
         break;
       case "--tui":
         args.tui = true;
@@ -90,6 +107,8 @@ Options:
   --thinking <variant>           Thinking variant name (default: off)
   --max-iter <n>                 Max loop iterations (default: 50, or RALPH_MAX_ITER)
   --once                         Run a single invocation without looping
+  --resume <session-id>          Resume an incomplete session
+  --no-status                    Disable the floating status bar
   --refresh                      Force refresh the model cache
   --tui                          Open the interactive TUI
   -h, --help                     Show this help message
@@ -100,7 +119,9 @@ Examples:
   ralph -m anthropic/claude-sonnet-4-20250514 "Refactor auth"
   ralph --thinking high "Solve this complex bug"
   ralph --max-iter 5 "Add input validation"
-  ralph --once "Explain the auth flow"`);
+  ralph --once "Explain the auth flow"
+  ralph --resume 2026-04-08_143022_a7x3             # resume a session
+  ralph --resume 2026-04-08_143022_a7x3 --max-iter 20`);
 }
 
 // ─── Model Loading ────────────────────────────────────────────────────────────
@@ -113,7 +134,7 @@ async function loadModels(forceRefresh = false): Promise<ModelInfo[]> {
     const models = await getModels(forceRefresh);
     s.stop(`Loaded ${models.length} models.`);
     return models;
-  } catch (err) {
+  } catch {
     s.stop("Failed to load models from SDK.");
 
     // Fallback: try parsing `opencode models` CLI output
@@ -123,8 +144,6 @@ async function loadModels(forceRefresh = false): Promise<ModelInfo[]> {
 }
 
 async function fallbackModelList(): Promise<ModelInfo[]> {
-  const { findOpencodeBin } = await import("./core/runner.js");
-
   try {
     const bin = await findOpencodeBin();
     const proc = Bun.spawn([bin, "models"], {
@@ -146,7 +165,7 @@ async function fallbackModelList(): Promise<ModelInfo[]> {
         name: modelID,
         providerID,
         modelID,
-        reasoning: false, // unknown from CLI
+        reasoning: false,
         variants: {},
       });
     }
@@ -158,7 +177,6 @@ async function fallbackModelList(): Promise<ModelInfo[]> {
 
 /**
  * Resolve variant config for CLI mode.
- * Looks up the thinking variant name in the model's variants map.
  */
 function resolveVariantConfig(
   thinking: string,
@@ -178,7 +196,56 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  // No args or --tui → TUI mode
+  // ─── Resume mode ────────────────────────────────────────────────────────
+  if (args.resume) {
+    const meta = await getSessionMeta(args.resume);
+    if (!meta) {
+      console.error(`Error: session "${args.resume}" not found.`);
+      process.exit(1);
+    }
+
+    if (meta.status === "complete") {
+      console.error(
+        `Session "${args.resume}" already completed (${meta.iterations} iterations). Nothing to resume.`
+      );
+      process.exit(1);
+    }
+
+    // Resolve variant config from the session's model/thinking
+    let variantConfig: Record<string, unknown> | null = null;
+    try {
+      const models = await getModels(args.refresh);
+      const modelInfo = models.find((m) => m.id === meta.model);
+      if (meta.thinking !== "off" && modelInfo) {
+        variantConfig = modelInfo.variants[meta.thinking] ?? null;
+      }
+    } catch {
+      // Can't load SDK data, proceed without variant config
+    }
+
+    // --max-iter controls additional iterations; defaults to original session's maxIter
+    const additionalIter = args.maxIter;
+
+    console.log(
+      `Resuming session ${meta.timestamp} from iteration ${meta.iterations}...`
+    );
+
+    await runSession({
+      model: meta.model,
+      thinking: meta.thinking,
+      maxIter: additionalIter,
+      prompt: meta.prompt,
+      variantConfig,
+      showStatusBar: !args.noStatus,
+      resumeSessionId: meta.timestamp,
+      resumeFromIteration: meta.iterations,
+      ...createRunCallbacks(),
+    });
+
+    return;
+  }
+
+  // ─── No args or --tui → TUI mode ───────────────────────────────────────
   if (!args.prompt && !args.tui) {
     args.tui = true;
   }
@@ -197,7 +264,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  // CLI mode with prompt
+  // ─── CLI mode with prompt ──────────────────────────────────────────────
   if (!args.prompt) {
     console.error("Error: No prompt provided.\n");
     printUsage();
@@ -217,31 +284,12 @@ async function main(): Promise<void> {
       }
 
       const fuse = createModelSearcher(models);
-
-      // Memoize search results per query to avoid O(n²) per keystroke
-      let lastQuery = "";
-      let matchSet: Set<string> = new Set();
-
-      const result = await p.autocomplete({
+      const result = await selectModel(models, fuse, {
         message: "Select a model",
-        options: models.map((m) => ({
-          value: m.id,
-          label: m.id,
-          hint: m.name !== m.modelID ? m.name : undefined,
-        })),
-        placeholder: "Search models...",
-        filter(search, option) {
-          if (!search) return true;
-          if (search !== lastQuery) {
-            lastQuery = search;
-            matchSet = new Set(searchModels(fuse, search).map((m) => m.id));
-          }
-          return matchSet.has(option.value as string);
-        },
       });
 
-      if (p.isCancel(result)) process.exit(0);
-      args.model = result as string;
+      if (!result) process.exit(0);
+      args.model = result;
     }
   }
 
@@ -272,7 +320,7 @@ async function main(): Promise<void> {
 
   // Single-run mode
   if (args.once) {
-    await runOnce(args.model, args.thinking, args.prompt, variantConfig);
+    await runOnce(args.model, args.prompt, variantConfig);
     return;
   }
 
@@ -283,18 +331,8 @@ async function main(): Promise<void> {
     maxIter: args.maxIter,
     prompt: args.prompt,
     variantConfig,
-    onIteration(current, max) {
-      console.log(`\n[${current}/${max}]\n`);
-    },
-    onComplete(iterations) {
-      console.log(`\n[complete: ${iterations} iterations]`);
-    },
-    onMaxReached(max) {
-      console.log(`\n[max iterations reached: ${max}]`);
-      console.log(
-        "  the agent may not have finished. re-run or increase --max-iter."
-      );
-    },
+    showStatusBar: !args.noStatus,
+    ...createRunCallbacks(),
   });
 }
 

@@ -1,6 +1,10 @@
 // ─── Agent File Generation ────────────────────────────────────────────────────
 // Creates temporary agent .md files with provider-specific thinking config
 // derived from the model's variant system.
+//
+// When a variant config is needed, the *full* frontmatter from ralph.md is
+// read and the variant keys are merged in, so changes to permissions,
+// temperature, etc. in ralph.md are always honoured.
 
 import { mkdirSync, readFileSync, writeFileSync, unlinkSync } from "fs";
 import { join, dirname } from "path";
@@ -8,11 +12,22 @@ import { homedir } from "os";
 
 const OC_AGENTS_DIR = join(homedir(), ".config", "opencode", "agents");
 
-// ─── Embedded default agent body ──────────────────────────────────────────────
-// This is the content of ralph.md (after the frontmatter) compiled into the
-// binary so the tool works even when ralph.md isn't on disk.  An external
-// ralph.md file, if found, will override this default.
-const DEFAULT_AGENT_BODY = `
+// ─── Embedded default agent content ──────────────────────────────────────────
+// Used when ralph.md isn't on disk (e.g. compiled binary).
+
+const DEFAULT_FRONTMATTER: Record<string, unknown> = {
+  description: "Autonomous agent that works until the task is fully complete",
+  mode: "primary",
+  temperature: 0.7,
+  color: "#FFFFFF",
+  permission: {
+    edit: "allow",
+    bash: { "*": "allow" },
+    webfetch: "allow",
+  },
+};
+
+const DEFAULT_BODY = `
 You are a fully autonomous coding agent.
 
 ## Autonomy Rules (CRITICAL)
@@ -25,6 +40,8 @@ You are a fully autonomous coding agent.
 - If you encounter an error, attempt to fix it yourself before asking for help.
 - Re-verify your work after making changes. Run tests, builds, or whatever is appropriate to confirm the fix.
 - When the task is fully complete and verified, you MUST output \`<ralph>DONE</ralph>\` as the very last line of your final message. This signals that you are finished. Do NOT output this token until the task is truly done.`;
+
+// ─── File discovery ──────────────────────────────────────────────────────────
 
 /** Try to find an external ralph.md agent file; returns null if not found */
 function findAgentFile(): string | null {
@@ -45,42 +62,40 @@ function findAgentFile(): string | null {
   return null;
 }
 
-/** Extract the markdown body from ralph.md (everything after the second ---) */
-function extractAgentBody(agentFile: string): string {
-  const content = readFileSync(agentFile, "utf-8");
+/**
+ * Parse ralph.md into its frontmatter key-values and markdown body.
+ * The frontmatter is returned as raw YAML text (between the --- markers).
+ */
+function parseAgentFile(path: string): { frontmatterText: string; body: string } {
+  const content = readFileSync(path, "utf-8");
   const lines = content.split("\n");
   let separators = 0;
+  const fmLines: string[] = [];
   const bodyLines: string[] = [];
   for (const line of lines) {
     if (/^---\s*$/.test(line)) {
       separators++;
       continue;
     }
-    if (separators >= 2) {
+    if (separators < 2) {
+      fmLines.push(line);
+    } else {
       bodyLines.push(line);
     }
   }
-  return bodyLines.join("\n");
+  return {
+    frontmatterText: fmLines.join("\n"),
+    body: bodyLines.join("\n"),
+  };
 }
 
-/**
- * Get the agent body text: use an external ralph.md if available,
- * otherwise fall back to the embedded default.
- */
-function getAgentBody(): string {
-  const externalFile = findAgentFile();
-  if (externalFile) {
-    return extractAgentBody(externalFile);
-  }
-  return DEFAULT_AGENT_BODY;
-}
+// ─── YAML helpers ────────────────────────────────────────────────────────────
 
 /**
  * Serialize a value to YAML string at the given indentation level.
  * Handles nested objects, arrays, strings, numbers, booleans, and null.
- * No external YAML dependency needed.
  */
-function toYaml(value: unknown, indent: number = 0): string {
+export function toYaml(value: unknown, indent: number = 0): string {
   const prefix = "  ".repeat(indent);
 
   if (value === null || value === undefined) {
@@ -116,7 +131,6 @@ function toYaml(value: unknown, indent: number = 0): string {
     const items = value.map((item) => {
       const serialized = toYaml(item, indent + 1);
       if (typeof item === "object" && item !== null && !Array.isArray(item)) {
-        // Object items: put first key on same line as dash
         return `${prefix}- ${serialized.trimStart()}`;
       }
       return `${prefix}- ${serialized}`;
@@ -150,9 +164,9 @@ export interface AgentSetup {
 
 /**
  * Set up the agent for a run.
- * If variantConfig is provided, creates a temp agent file with that config
- * merged into the frontmatter. Returns the agent name and path to any
- * temp file (for cleanup).
+ * If variantConfig is provided, creates a temp agent file with the variant
+ * config merged into the *real* frontmatter from ralph.md (so permission,
+ * temperature, etc. changes in ralph.md are always honoured).
  */
 export function setupAgent(
   variantConfig: Record<string, unknown> | null
@@ -161,29 +175,29 @@ export function setupAgent(
     return { agentName: "ralph", tmpFile: null };
   }
 
-  const body = getAgentBody();
-  const tmpName = `ralph-tmp-${process.pid}`;
+  // Read the real agent file (or fall back to defaults)
+  let frontmatterText: string;
+  let body: string;
+  const externalFile = findAgentFile();
 
+  if (externalFile) {
+    const parsed = parseAgentFile(externalFile);
+    frontmatterText = parsed.frontmatterText;
+    body = parsed.body;
+  } else {
+    // No file on disk -- build frontmatter from embedded defaults
+    frontmatterText = toYaml(DEFAULT_FRONTMATTER, 0);
+    body = DEFAULT_BODY;
+  }
+
+  // Merge variant config: append variant YAML after the existing frontmatter
+  const variantYaml = toYaml(variantConfig, 0);
+
+  const tmpName = `ralph-tmp-${process.pid}`;
   mkdirSync(OC_AGENTS_DIR, { recursive: true });
   const tmpPath = join(OC_AGENTS_DIR, `${tmpName}.md`);
 
-  // Serialize the variant config as top-level YAML keys
-  const variantYaml = toYaml(variantConfig, 0);
-
-  const content = `---
-description: Autonomous agent that works until the task is fully complete
-mode: primary
-temperature: 0.7
-color: "#FFFFFF"
-${variantYaml}
-permission:
-  edit: allow
-  bash:
-    "*": allow
-  webfetch: allow
----
-${body}`;
-
+  const content = `---\n${frontmatterText}\n${variantYaml}\n---\n${body}`;
   writeFileSync(tmpPath, content, "utf-8");
 
   return { agentName: tmpName, tmpFile: tmpPath };

@@ -7,10 +7,13 @@ import Fuse from "fuse.js";
 import { mkdirSync } from "fs";
 import { join } from "path";
 import type { ModelInfo } from "../types.js";
-import { findOpencodeBin } from "./runner.js";
-import { RALPH_HOME } from "./config.js";
+import { startServer, findOpencodeBin } from "./opencode.js";
+import { getRalphHome } from "./config.js";
 
-const CACHE_FILE = join(RALPH_HOME, "models.cache.json");
+function getCacheFile(): string {
+  return join(getRalphHome(), "models.cache.json");
+}
+
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 interface ProviderModel {
@@ -47,19 +50,11 @@ interface ProviderListResponse {
  * Only returns models from connected (authenticated) providers.
  */
 export async function fetchModels(): Promise<ModelInfo[]> {
-  const opencodeBin = await findOpencodeBin();
-  const port = 14000 + Math.floor(Math.random() * 1000);
-  const hostname = "127.0.0.1";
-
-  const proc = Bun.spawn([opencodeBin, "serve", `--hostname=${hostname}`, `--port=${port}`], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  const { proc, url } = await startServer();
 
   try {
-    const serverUrl = await waitForServer(proc, 15000);
     const { createOpencodeClient } = await import("@opencode-ai/sdk");
-    const client = createOpencodeClient({ baseUrl: serverUrl });
+    const client = createOpencodeClient({ baseUrl: url });
 
     const result = await client.provider.list();
     const data = result.data as unknown as ProviderListResponse;
@@ -67,8 +62,7 @@ export async function fetchModels(): Promise<ModelInfo[]> {
     const connectedSet = new Set(data.connected ?? []);
     const models: ModelInfo[] = [];
 
-    for (const provider of (data.all ?? [])) {
-      // Only include models from connected providers
+    for (const provider of data.all ?? []) {
       if (!connectedSet.has(provider.id)) continue;
 
       for (const [modelKey, model] of Object.entries(provider.models ?? {})) {
@@ -97,12 +91,11 @@ interface ModelCache {
 }
 
 /** Read models from the disk cache if it exists and is within TTL. */
-function loadFromCache(): ModelInfo[] | null {
+async function loadFromCache(): Promise<ModelInfo[] | null> {
   try {
-    const file = Bun.file(CACHE_FILE);
-    // Bun.file doesn't have a sync exists check, so we use readFileSync
-    const text = require("fs").readFileSync(CACHE_FILE, "utf-8");
-    const cache: ModelCache = JSON.parse(text);
+    const file = Bun.file(getCacheFile());
+    if (!(await file.exists())) return null;
+    const cache: ModelCache = await file.json();
     if (Date.now() - cache.timestamp < CACHE_TTL_MS && cache.models?.length > 0) {
       return cache.models;
     }
@@ -113,11 +106,12 @@ function loadFromCache(): ModelInfo[] | null {
 }
 
 /** Write models to the disk cache. */
-function saveToCache(models: ModelInfo[]): void {
+async function saveToCache(models: ModelInfo[]): Promise<void> {
   try {
-    mkdirSync(RALPH_HOME, { recursive: true });
+    const ralphHome = getRalphHome();
+    mkdirSync(ralphHome, { recursive: true });
     const cache: ModelCache = { timestamp: Date.now(), models };
-    require("fs").writeFileSync(CACHE_FILE, JSON.stringify(cache), "utf-8");
+    await Bun.write(getCacheFile(), JSON.stringify(cache));
   } catch {
     // Non-fatal — cache write failure shouldn't block the app
   }
@@ -129,55 +123,13 @@ function saveToCache(models: ModelInfo[]): void {
  */
 export async function getModels(forceRefresh = false): Promise<ModelInfo[]> {
   if (!forceRefresh) {
-    const cached = loadFromCache();
+    const cached = await loadFromCache();
     if (cached) return cached;
   }
 
   const models = await fetchModels();
-  saveToCache(models);
+  await saveToCache(models);
   return models;
-}
-
-/**
- * Wait for the OpenCode server to emit its "listening" line, extract URL.
- */
-async function waitForServer(proc: ReturnType<typeof Bun.spawn>, timeoutMs: number): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      proc.kill();
-      reject(new Error(`OpenCode server did not start within ${timeoutMs}ms`));
-    }, timeoutMs);
-
-    let output = "";
-    const decoder = new TextDecoder();
-
-    const stdout = proc.stdout as ReadableStream<Uint8Array>;
-    const reader = stdout.getReader();
-    const read = async () => {
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          output += decoder.decode(value);
-          if (output.includes("listening")) {
-            clearTimeout(timer);
-            const match = output.match(/on\s+(https?:\/\/[^\s]+)/);
-            if (match) {
-              resolve(match[1]);
-              return;
-            }
-            reject(new Error("Could not parse server URL from output"));
-            return;
-          }
-        }
-      } catch (err) {
-        clearTimeout(timer);
-        reject(err);
-      }
-    };
-
-    read();
-  });
 }
 
 /**
@@ -198,7 +150,7 @@ export function createModelSearcher(models: ModelInfo[]): Fuse<ModelInfo> {
 
 /**
  * Search models with space-separated AND terms.
- * e.g. "opus 4.6" → matches models containing both "opus" AND "4.6"
+ * e.g. "opus 4.6" matches models containing both "opus" AND "4.6"
  */
 export function searchModels(fuse: Fuse<ModelInfo>, query: string): ModelInfo[] {
   if (!query.trim()) return fuse.getIndex().docs as unknown as ModelInfo[];

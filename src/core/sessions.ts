@@ -1,14 +1,26 @@
 // ─── Session Meta Storage ─────────────────────────────────────────────────────
-// Read/write session metadata to ~/.ralph/sessions/*.meta
+// Read/write session metadata to ~/.ralph/sessions/*.json
 
 import { mkdirSync, readdirSync } from "fs";
 import type { SessionMeta } from "../types.js";
-import { SESSIONS_DIR } from "./config.js";
+import { getSessionsDir } from "./config.js";
 
+export interface SessionsStoreOptions {
+  /** Optional override for tests or custom storage locations. */
+  sessionsDir?: string;
+}
+
+function resolveSessionsDir(opts?: SessionsStoreOptions): string {
+  return opts?.sessionsDir ?? getSessionsDir();
+}
+
+/**
+ * Generate a collision-safe session ID: timestamp + random suffix.
+ */
 export function generateSessionId(): string {
   const now = new Date();
   const pad = (n: number, len = 2) => String(n).padStart(len, "0");
-  return [
+  const ts = [
     now.getFullYear(),
     "-",
     pad(now.getMonth() + 1),
@@ -19,37 +31,36 @@ export function generateSessionId(): string {
     pad(now.getMinutes()),
     pad(now.getSeconds()),
   ].join("");
+
+  const rand = Math.random().toString(36).slice(2, 6);
+  return `${ts}_${rand}`;
 }
 
-export async function saveSessionMeta(meta: SessionMeta): Promise<void> {
-  mkdirSync(SESSIONS_DIR, { recursive: true });
-
-  const safePrompt = meta.prompt.replace(/\n/g, " ");
-  const content = [
-    `timestamp=${meta.timestamp}`,
-    `model=${meta.model}`,
-    `thinking=${meta.thinking}`,
-    `max_iter=${meta.maxIter}`,
-    `prompt=${safePrompt}`,
-    `status=${meta.status}`,
-    `iterations=${meta.iterations}`,
-    "",
-  ].join("\n");
-
-  await Bun.write(`${SESSIONS_DIR}/${meta.timestamp}.meta`, content);
+export async function saveSessionMeta(
+  meta: SessionMeta,
+  opts?: SessionsStoreOptions
+): Promise<void> {
+  const sessionsDir = resolveSessionsDir(opts);
+  mkdirSync(sessionsDir, { recursive: true });
+  // JSON preserves multi-line prompts without escaping issues
+  await Bun.write(
+    `${sessionsDir}/${meta.timestamp}.json`,
+    JSON.stringify(meta, null, 2)
+  );
 }
 
-export async function listSessions(): Promise<SessionMeta[]> {
+export async function listSessions(opts?: SessionsStoreOptions): Promise<SessionMeta[]> {
   try {
-    mkdirSync(SESSIONS_DIR, { recursive: true });
-    const files = readdirSync(SESSIONS_DIR)
-      .filter((f) => f.endsWith(".meta"))
+    const sessionsDir = resolveSessionsDir(opts);
+    mkdirSync(sessionsDir, { recursive: true });
+    const files = readdirSync(sessionsDir)
+      .filter((f) => f.endsWith(".json") || f.endsWith(".meta"))
       .sort()
       .reverse();
 
     const sessions: SessionMeta[] = [];
     for (const file of files) {
-      const meta = await readSessionMeta(`${SESSIONS_DIR}/${file}`);
+      const meta = await readSessionMeta(`${sessionsDir}/${file}`);
       if (meta) sessions.push(meta);
     }
     return sessions;
@@ -61,6 +72,13 @@ export async function listSessions(): Promise<SessionMeta[]> {
 async function readSessionMeta(path: string): Promise<SessionMeta | null> {
   try {
     const text = await Bun.file(path).text();
+
+    // New JSON format
+    if (path.endsWith(".json")) {
+      return JSON.parse(text) as SessionMeta;
+    }
+
+    // Legacy .meta key=value format (read-only compat)
     const fields: Record<string, string> = {};
     for (const line of text.split("\n")) {
       const eq = line.indexOf("=");
@@ -82,8 +100,25 @@ async function readSessionMeta(path: string): Promise<SessionMeta | null> {
   }
 }
 
-export function getLogPath(sessionId: string): string {
-  return `${SESSIONS_DIR}/${sessionId}.log`;
+/**
+ * Load a single session by ID. Tries .json first, then legacy .meta.
+ */
+export async function getSessionMeta(
+  sessionId: string,
+  opts?: SessionsStoreOptions
+): Promise<SessionMeta | null> {
+  const sessionsDir = resolveSessionsDir(opts);
+  const jsonPath = `${sessionsDir}/${sessionId}.json`;
+  const meta = await readSessionMeta(jsonPath);
+  if (meta) return meta;
+
+  // Fallback to legacy format
+  const metaPath = `${sessionsDir}/${sessionId}.meta`;
+  return readSessionMeta(metaPath);
+}
+
+export function getLogPath(sessionId: string, opts?: SessionsStoreOptions): string {
+  return `${resolveSessionsDir(opts)}/${sessionId}.log`;
 }
 
 export function formatSessionLine(meta: SessionMeta): string {

@@ -4,7 +4,7 @@ import * as p from "@clack/prompts";
 import type Fuse from "fuse.js";
 import type { Config, ModelInfo } from "../types.js";
 import { saveConfig } from "../core/config.js";
-import { searchModels } from "../core/models.js";
+import { selectModel, validatePositiveInt } from "./helpers.js";
 
 interface SettingsOptions {
   config: Config;
@@ -45,44 +45,19 @@ export async function settingsFlow(opts: SettingsOptions): Promise<Config> {
     }
 
     if (choice === "model") {
-      const modelOptions = models.map((m) => ({
-        value: m.id,
-        label: m.id,
-        hint: m.name !== m.modelID ? m.name : undefined,
-      }));
-
-      // Memoize search results per query to avoid O(n²) per keystroke
-      let lastQuery = "";
-      let matchSet: Set<string> = new Set();
-
-      const result = await p.autocomplete({
+      const result = await selectModel(models, fuse, {
         message: "Default model",
-        options: modelOptions,
-        placeholder: "Search models...",
-        initialUserInput: updated.defaultModel || undefined,
-        filter(search, option) {
-          if (!search) return true;
-          if (search !== lastQuery) {
-            lastQuery = search;
-            matchSet = new Set(searchModels(fuse, search).map((m) => m.id));
-          }
-          return matchSet.has(option.value as string);
-        },
+        initial: updated.defaultModel,
       });
-
-      if (!p.isCancel(result)) {
-        updated.defaultModel = result as string;
+      if (result) {
+        updated.defaultModel = result;
       }
     }
 
     if (choice === "thinking") {
-      // Default thinking is a variant name hint.
-      // Since available variants vary per model, we use a text input
-      // with common suggestions. The actual variant is validated at
-      // session time against the selected model's variants.
       const result = await p.text({
         message: "Default thinking variant",
-        placeholder: 'off, low, medium, high, max, etc.',
+        placeholder: "off, low, medium, high, max, etc.",
         defaultValue: updated.defaultThinking,
       });
 
@@ -95,10 +70,7 @@ export async function settingsFlow(opts: SettingsOptions): Promise<Config> {
       const result = await p.text({
         message: "Default max iterations",
         defaultValue: String(updated.defaultMaxIter),
-        validate(val: string | undefined) {
-          const n = parseInt(val ?? "", 10);
-          if (isNaN(n) || n < 1) return "Enter a positive number";
-        },
+        validate: validatePositiveInt,
       });
 
       if (!p.isCancel(result)) {
