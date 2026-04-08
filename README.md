@@ -74,17 +74,17 @@ By default Ralph has:
 | Tool | Permission |
 |------|-----------|
 | `edit` | `allow` -- no prompts, so it doesn't stop on every file change |
-| `bash` | `ask` -- prompts before running shell commands |
-| `webfetch` | `ask` -- prompts before fetching URLs |
+| `bash` | `allow` -- runs shell commands without prompts for full autonomy |
+| `webfetch` | `allow` -- fetches URLs without prompts |
 
-To customize, edit `ralph.md` and adjust the `permission` block. See the [OpenCode permissions docs](https://opencode.ai/docs/permissions/) for the full syntax, including granular bash patterns like:
+To customize, edit `ralph.md` and adjust the `permission` block. See the [OpenCode permissions docs](https://opencode.ai/docs/permissions/) for the full syntax. For example, to require approval for specific commands:
 
 ```yaml
 permission:
   bash:
-    "*": ask
-    "npm test*": allow
-    "git status*": allow
+    "*": allow
+    "rm -rf*": ask
+    "git push*": ask
 ```
 
 ## Configuration
@@ -93,7 +93,7 @@ permission:
 |---------|-------|-----|
 | `mode` | `primary` | Tab-switchable in TUI |
 | `temperature` | `0.7` | More creative Ralph-like narration |
-| `color` | `#FFD700` | Gold, like Ralph's... personality |
+| `color` | `#FF073A` | Neon red, like Ralph's firetruck dreams |
 | `edit: allow` | No approval pauses | Core fix for the "stops each step" problem |
 
 ## License
