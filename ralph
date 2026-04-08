@@ -2,9 +2,9 @@
 set -euo pipefail
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Ralph — Autonomous OpenCode agent with an interactive TUI
+# ralph — Autonomous OpenCode agent with an interactive TUI
 #
-#   No arguments  → interactive TUI (requires gum)
+#   No arguments  → interactive TUI (requires gum + fzf)
 #   With a prompt → direct CLI mode (original behavior, no gum required)
 #
 # See: ralph --help
@@ -21,8 +21,11 @@ OC_AGENTS_DIR="$HOME/.config/opencode/agents"
 DONE_TOKEN="<ralph>DONE</ralph>"
 CLR="#FFFFFF"
 DIM="#666666"
-ACCENT="#88AAFF"
-SUBTLE="#444444"
+ACCENT="#FFFFFF"
+SUBTLE="#555555"
+
+# fzf common styling — monotone, bordered, minimal
+FZF_OPTS="--color=fg:#FFFFFF,fg+:#FFFFFF,bg:-1,bg+:#333333,hl:#AAAAAA,hl+:#FFFFFF,info:#666666,prompt:#666666,pointer:#FFFFFF,marker:#FFFFFF,header:#666666,border:#555555,gutter:-1 --border=rounded --reverse --no-info --no-scrollbar --pointer=▸ --margin=0,2"
 
 # Globals set by load_config / CLI flags
 DEFAULT_MODEL="${RALPH_MODEL:-}"
@@ -64,14 +67,43 @@ EOF
 # ─── Dependency Check ───────────────────────────────────────────────────────────
 
 has_gum() { command -v gum &>/dev/null; }
+has_fzf() { command -v fzf &>/dev/null; }
 
-ensure_gum() {
-  if has_gum; then return 0; fi
+ensure_deps() {
+  local missing=()
+  has_gum || missing+=("gum")
+  has_fzf || missing+=("fzf")
+
+  if [[ ${#missing[@]} -eq 0 ]]; then return 0; fi
 
   echo ""
-  echo "Ralph TUI requires 'gum' by Charmbracelet."
-  echo "  https://github.com/charmbracelet/gum"
+  echo "TUI mode requires the following tools:"
+  for dep in "${missing[@]}"; do
+    echo "  - $dep"
+  done
   echo ""
+
+  if [[ " ${missing[*]} " == *" gum "* ]]; then
+    echo "Install gum: https://github.com/charmbracelet/gum#installation"
+  fi
+  if [[ " ${missing[*]} " == *" fzf "* ]]; then
+    echo "Install fzf: https://github.com/junegunn/fzf#installation"
+  fi
+  echo ""
+
+  # Offer auto-install for gum if it's the only or one of the missing deps
+  if [[ " ${missing[*]} " == *" gum "* ]]; then
+    _offer_gum_install
+  fi
+
+  # Re-check after potential install
+  if ! has_gum || ! has_fzf; then
+    echo "Cannot run the TUI without both gum and fzf."
+    exit 1
+  fi
+}
+
+_offer_gum_install() {
 
   local -a cmds=() labels=()
 
@@ -224,7 +256,7 @@ YAML
 
   cat > "$_TMP_AGENT_FILE" <<AGENT
 ---
-description: Autonomous agent that works until the task is fully complete, narrated in Ralph Wiggum's voice
+description: Autonomous agent that works until the task is fully complete
 mode: primary
 temperature: 0.7
 color: "$CLR"
@@ -294,7 +326,7 @@ _session_line() {
 
 # ─── Core Run Loop ─────────────────────────────────────────────────────────────
 
-# Runs the ralph agent loop. Works in both TUI and CLI mode (plain echo only).
+# Runs the agent loop. Works in both TUI and CLI mode (plain echo only).
 # Arguments: model thinking max_iter prompt
 run_session() {
   local model="$1" thinking="$2" max_iter="$3" prompt="$4"
@@ -320,7 +352,7 @@ run_session() {
     iterations=$i
 
     echo ""
-    echo "── iteration $i / $max_iter ──"
+    echo "[$i/$max_iter]"
     echo ""
 
     local iter_prompt
@@ -338,15 +370,15 @@ run_session() {
     if echo "$output" | grep -qF "$DONE_TOKEN"; then
       status="complete"
       echo ""
-      echo "── complete (iteration $i) ──"
+      echo "[complete: $i iterations]"
       break
     fi
   done
 
   if [[ "$status" != "complete" ]]; then
     echo ""
-    echo "── max iterations ($max_iter) reached ──"
-    echo "   the agent may not have finished. re-run or increase --max-iter."
+    echo "[max iterations reached: $max_iter]"
+    echo "  the agent may not have finished. re-run or increase --max-iter."
   fi
 
   save_session_meta "$session_id" "$model" "$thinking" "$max_iter" "$prompt" "$status" "$iterations"
@@ -370,86 +402,80 @@ _select_model() {
   models=$(echo "$raw" | grep -oE '[a-zA-Z0-9_-]+/[a-zA-Z0-9._-]+' | sort -u || true)
 
   if [[ -n "$models" ]]; then
-    echo "$models" | gum filter \
-      --fuzzy \
-      --placeholder "Type to search models…" \
-      --height 15 \
-      --value "$current" \
-      --indicator.foreground "$ACCENT" \
-      --match.foreground "$ACCENT" \
-      --prompt.foreground "$DIM" \
-      --text.foreground "$CLR"
+    # shellcheck disable=SC2086
+    echo "$models" | fzf $FZF_OPTS \
+      --height=~17 \
+      --prompt="  > " \
+      --header="  MODEL" \
+      --query="$current"
   else
     gum input --placeholder "provider/model-id (e.g. anthropic/claude-sonnet-4-20250514)" \
-      --value "$current" --prompt "  ❯ " \
-      --prompt.foreground "$ACCENT"
+      --value "$current" --prompt "  │ " \
+      --prompt.foreground "$SUBTLE"
   fi
 }
 
 # ─── TUI Screens ───────────────────────────────────────────────────────────────
 
 _show_banner() {
-  gum style \
-    --foreground "$CLR" --bold \
-    --align center --width 50 \
-    --margin "1 2" --padding "0 2" \
-    '' \
-    '  r a l p h' \
-    ''
+  echo ""
 }
 
 _new_session_ui() {
   # 1. Model
   echo ""
-  gum style --foreground "$ACCENT" --bold "  Model"
   local model
   model=$(_select_model "${DEFAULT_MODEL:-}") || return
   if [[ -z "$model" ]]; then
-    gum style --foreground "$DIM" "  No model selected."
+    gum style --foreground "$DIM" "  No model selected. Enter a provider/model-id to continue."
     sleep 1
     return
   fi
 
   # 2. Thinking
   echo ""
-  gum style --foreground "$ACCENT" --bold "  Thinking"
   local thinking
-  thinking=$(gum choose --selected "${DEFAULT_THINKING:-off}" \
-    --cursor.foreground "$ACCENT" \
-    "off" "low" "high" "max") || return
+  # shellcheck disable=SC2086
+  thinking=$(printf '%s\n' "off" "low" "high" "max" | fzf $FZF_OPTS \
+    --height=~6 \
+    --prompt="  > " \
+    --header="  THINKING" \
+    --no-sort) || return
 
   # 3. Max iterations
   echo ""
+  gum style --foreground "$DIM" "  MAX ITERATIONS"
   local max_iter
   max_iter=$(gum input --placeholder "50" \
     --value "${DEFAULT_MAX_ITER:-50}" \
-    --prompt "  Max iterations: " --width 30 \
-    --prompt.foreground "$ACCENT") || return
+    --prompt "  │ " --width 30 \
+    --prompt.foreground "$SUBTLE") || return
   max_iter="${max_iter:-50}"
 
   # 4. Prompt
   echo ""
-  gum style --foreground "$ACCENT" --bold "  Prompt"
+  gum style --foreground "$DIM" "  PROMPT"
   local prompt
-  prompt=$(gum write --placeholder "What should Ralph work on?" \
+  prompt=$(gum write --placeholder "Describe the task..." \
     --char-limit 0 --width 100 --height 6) || return
   if [[ -z "$prompt" ]]; then
-    gum style --foreground "$DIM" "  No prompt entered."
+    gum style --foreground "$DIM" "  No prompt entered. Describe what you want to work on."
     sleep 1
     return
   fi
 
   # 5. Confirm
   echo ""
+  local summary
+  summary=$(printf "  %-14s %s\n  %-14s %s\n  %-14s %s\n\n  %-14s\n  %s" \
+    "Model" "$model" \
+    "Thinking" "$thinking" \
+    "Max iter" "$max_iter" \
+    "Prompt" "$prompt")
   gum style \
     --border rounded --border-foreground "$SUBTLE" \
     --padding "1 2" --margin "0 2" --width 100 \
-    "  Model       $model" \
-    "  Thinking    $thinking" \
-    "  Max iter    $max_iter" \
-    "" \
-    "  Prompt" \
-    "  $prompt"
+    "$summary"
   echo ""
 
   if ! gum confirm --prompt.foreground "$ACCENT" "Start session?"; then
@@ -464,7 +490,7 @@ _new_session_ui() {
 
 _sessions_ui() {
   if [[ ! -d "$SESSIONS_DIR" ]]; then
-    gum style --foreground "$DIM" "  No sessions yet."
+    gum style --foreground "$DIM" "  No sessions yet. Start a new session to get going."
     sleep 1.5
     return
   fi
@@ -475,7 +501,7 @@ _sessions_ui() {
   done < <(ls -t "$SESSIONS_DIR"/*.meta 2>/dev/null || true)
 
   if [[ ${#metas[@]} -eq 0 ]]; then
-    gum style --foreground "$DIM" "  No sessions yet."
+    gum style --foreground "$DIM" "  No sessions yet. Start a new session to get going."
     sleep 1.5
     return
   fi
@@ -487,14 +513,12 @@ _sessions_ui() {
   done
 
   local selected
+  # shellcheck disable=SC2086
   selected=$(printf '%s\n' "${lines[@]}" \
-    | gum filter \
-      --fuzzy \
-      --placeholder "Search sessions…" \
-      --height 15 \
-      --indicator.foreground "$ACCENT" \
-      --match.foreground "$ACCENT" \
-      --prompt.foreground "$DIM") || return
+    | fzf $FZF_OPTS \
+      --height=~17 \
+      --prompt="  > " \
+      --header="  SESSIONS") || return
 
   # Extract the timestamp from the selected line (second field)
   local ts
@@ -516,9 +540,11 @@ _sessions_ui() {
   echo ""
 
   local action
-  action=$(gum choose \
-    --cursor.foreground "$ACCENT" \
-    "view log" "re-run (same settings)" "back") || return
+  # shellcheck disable=SC2086
+  action=$(printf '%s\n' "view log" "re-run (same settings)" "back" | fzf $FZF_OPTS \
+    --height=~5 \
+    --prompt="  > " \
+    --no-sort) || return
 
   case "$action" in
     "view log")
@@ -547,36 +573,42 @@ _sessions_ui() {
 _settings_ui() {
   while true; do
     clear
-    gum style --foreground "$ACCENT" --bold --margin "1 2" "  Settings"
     echo ""
 
     local choice
-    choice=$(gum choose \
-      --cursor.foreground "$ACCENT" \
+    # shellcheck disable=SC2086
+    choice=$(printf '%s\n' \
       "Default model:          ${DEFAULT_MODEL:-<not set>}" \
       "Default thinking:       $DEFAULT_THINKING" \
       "Default max iterations: $DEFAULT_MAX_ITER" \
-      "" \
-      "Save & back") || return
+      "Save & back" \
+      | fzf $FZF_OPTS \
+        --height=~8 \
+        --prompt="  > " \
+        --header="  SETTINGS" \
+        --no-sort) || return
 
     case "$choice" in
       "Default model"*)
         DEFAULT_MODEL=$(_select_model "${DEFAULT_MODEL:-}") || true
         ;;
       "Default thinking"*)
-        DEFAULT_THINKING=$(gum choose --selected "$DEFAULT_THINKING" \
-          --cursor.foreground "$ACCENT" \
-          "off" "low" "high" "max") || true
+        # shellcheck disable=SC2086
+        DEFAULT_THINKING=$(printf '%s\n' "off" "low" "high" "max" | fzf $FZF_OPTS \
+          --height=~6 \
+          --prompt="  > " \
+          --header="  THINKING" \
+          --no-sort) || true
         ;;
       "Default max"*)
         DEFAULT_MAX_ITER=$(gum input --placeholder "50" \
-          --value "$DEFAULT_MAX_ITER" --prompt "  Max iterations: " \
-          --prompt.foreground "$ACCENT") || true
+          --value "$DEFAULT_MAX_ITER" --prompt "  │ " \
+          --prompt.foreground "$SUBTLE") || true
         ;;
       "Save & back")
         save_config
         echo ""
-        gum style --foreground "$ACCENT" "  Saved to $CONFIG_FILE"
+        gum style --foreground "$CLR" "  Saved to $CONFIG_FILE"
         sleep 1
         return
         ;;
@@ -585,7 +617,7 @@ _settings_ui() {
 }
 
 _menu_loop() {
-  ensure_gum
+  ensure_deps
   load_config
 
   while true; do
@@ -593,12 +625,11 @@ _menu_loop() {
     _show_banner
 
     local choice
-    choice=$(gum choose \
-      --cursor.foreground "$ACCENT" \
-      "New session" \
-      "Recent sessions" \
-      "Settings" \
-      "Quit") || exit 0
+    # shellcheck disable=SC2086
+    choice=$(printf '%s\n' "New session" "Recent sessions" "Settings" "Quit" | fzf $FZF_OPTS \
+      --height=~6 \
+      --prompt="  > " \
+      --no-sort) || exit 0
 
     case "$choice" in
       "New session")       _new_session_ui ;;
@@ -615,9 +646,9 @@ usage() {
   cat <<'USAGE'
 Usage: ralph [options] [prompt]
 
-Autonomous OpenCode agent narrated by Ralph Wiggum.
+Autonomous OpenCode agent.
 
-With no arguments, opens the interactive TUI (requires gum).
+With no arguments, opens the interactive TUI (requires gum + fzf).
 With a prompt, runs directly in the terminal.
 
 Options:
@@ -641,9 +672,10 @@ Setup:
     cp ralph.md ~/.config/opencode/agents/ralph.md   # global
     cp ralph.md .opencode/agents/ralph.md            # per-project
 
-  Install gum for the TUI (optional, only needed for interactive mode):
-    brew install gum                                 # macOS / Homebrew
-    go install github.com/charmbracelet/gum@latest   # Go
+  Install gum and fzf for the TUI (optional, only needed for interactive mode):
+    brew install gum fzf                             # macOS / Homebrew
+    sudo apt install fzf                             # Debian / Ubuntu
+    go install github.com/charmbracelet/gum@latest   # Go (gum only)
 USAGE
 }
 
