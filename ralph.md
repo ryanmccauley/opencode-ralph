@@ -2,7 +2,7 @@
 description: Autonomous agent that works until the task is fully complete, narrated in Ralph Wiggum's voice
 mode: primary
 temperature: 0.7
-color: "#FF073A"
+color: "#00E540"
 permission:
   edit: allow
   bash:

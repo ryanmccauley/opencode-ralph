@@ -120,7 +120,7 @@ permission:
 |---------|-------|-----|
 | `mode` | `primary` | Tab-switchable in TUI |
 | `temperature` | `0.7` | More creative Ralph-like narration |
-| `color` | `#FF073A` | Neon red, like Ralph's firetruck dreams |
+| `color` | `#00E540` | Dark neon green, like the Leprechaun that tells me to burn things |
 | `edit: allow` | No approval pauses | Core fix for the "stops each step" problem |
 
 ## License
