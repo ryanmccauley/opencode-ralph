@@ -1,0 +1,67 @@
+#!/bin/bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AGENT_FILE="$SCRIPT_DIR/ralph.md"
+
+usage() {
+  echo "Usage: ralph [options] <prompt>"
+  echo ""
+  echo "Run OpenCode with the Ralph Wiggum autonomous agent."
+  echo ""
+  echo "Options:"
+  echo "  -m, --model <provider/model>   Model to use (or set RALPH_MODEL env var)"
+  echo "  -h, --help                     Show this help message"
+  echo ""
+  echo "Examples:"
+  echo "  ralph \"Fix all failing E2E tests until they pass\""
+  echo "  ralph -m anthropic/claude-sonnet-4-20250514 \"Refactor the auth module\""
+  echo "  RALPH_MODEL=openai/gpt-4.1 ralph \"Add unit tests for the API layer\""
+  echo ""
+  echo "Setup:"
+  echo "  Copy or symlink ralph.md into your OpenCode agents directory:"
+  echo "    cp ralph.md ~/.config/opencode/agents/ralph.md   # global"
+  echo "    cp ralph.md .opencode/agents/ralph.md            # per-project"
+}
+
+MODEL="${RALPH_MODEL:-}"
+PROMPT=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -m|--model)
+      MODEL="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      PROMPT="$*"
+      break
+      ;;
+  esac
+done
+
+if [ -z "$PROMPT" ]; then
+  echo "Error: No prompt provided."
+  echo ""
+  usage
+  exit 1
+fi
+
+if [ -z "$MODEL" ]; then
+  echo "No model specified. Use -m or set RALPH_MODEL."
+  echo ""
+  echo "Available models:"
+  opencode models 2>/dev/null || echo "  (could not list models -- is opencode installed?)"
+  echo ""
+  read -rp "Model (provider/model-id): " MODEL
+  if [ -z "$MODEL" ]; then
+    echo "Error: No model selected."
+    exit 1
+  fi
+fi
+
+exec opencode run --agent ralph --model "$MODEL" "$PROMPT"
