@@ -1,5 +1,7 @@
 // ─── Session Runner ───────────────────────────────────────────────────────────
 // Runs the opencode agent loop, detects done token, logs output.
+// Uses `opencode run --format json` for structured event output and feeds
+// events through the tree renderer for formatted display.
 
 import { mkdirSync } from "fs";
 import { setupAgent, cleanupAgent } from "./agent.js";
@@ -12,6 +14,7 @@ import {
 import { getSessionsDir } from "./config.js";
 import { DONE_TOKEN } from "../types.js";
 import { StatusBar, canShowStatusBar } from "../tui/status-bar.js";
+import { TreeRenderer, type RendererWriter } from "../tui/renderer.js";
 
 export interface RunOptions {
   model: string;
@@ -23,6 +26,8 @@ export interface RunOptions {
   variantConfig?: Record<string, unknown> | null;
   /** Whether to show the floating status bar (default: true). */
   showStatusBar?: boolean;
+  /** Whether to use the tree renderer for structured output (default: true). */
+  useRenderer?: boolean;
 
   // ─── Resume fields ──────────────────────────────────────────────────────
   /** Existing session ID to resume. When set, reuses the session's log and
@@ -45,6 +50,13 @@ export interface StatusBarLike {
   stop(): void;
   setIteration(current: number): void;
   write(text: string): void;
+}
+
+export interface RendererLike {
+  onEvent(event: import("../tui/events.js").RenderEvent): void;
+  feedChunk(chunk: string): void;
+  flush(): void;
+  cleanup(): void;
 }
 
 type RunOpencodeFn = (
@@ -70,6 +82,7 @@ export interface RunnerDeps {
     thinking: string;
     maxIter: number;
   }) => StatusBarLike;
+  createRenderer: (writer: RendererWriter) => RendererLike;
   runOpencode: RunOpencodeFn;
   mkdirSync: typeof mkdirSync;
   writeStdout: (text: string) => void;
@@ -87,6 +100,9 @@ const DEFAULT_RUNNER_DEPS: RunnerDeps = {
   canShowStatusBar,
   createStatusBar(opts) {
     return new StatusBar(opts);
+  },
+  createRenderer(writer: RendererWriter) {
+    return new TreeRenderer({ writer });
   },
   runOpencode,
   mkdirSync,
@@ -130,6 +146,7 @@ export async function runSessionWithDeps(
   deps.mkdirSync(deps.getSessionsDir(), { recursive: true });
 
   const useStatusBar = (opts.showStatusBar ?? true) && deps.canShowStatusBar();
+  const useRenderer = opts.useRenderer ?? true;
 
   const agent = deps.setupAgent(variantConfig ?? null);
   const opencodeBin = await deps.findOpencodeBin();
@@ -143,15 +160,28 @@ export async function runSessionWithDeps(
     bar.start();
   }
 
+  // Set up the tree renderer for structured output
+  const rendererWriter: RendererWriter = bar
+    ? { write: (text: string) => bar!.write(text) }
+    : { write: (text: string) => deps.writeStdout(text) };
+  let renderer: RendererLike | null = null;
+  if (useRenderer) {
+    renderer = deps.createRenderer(rendererWriter);
+    // Emit the session header
+    renderer.onEvent({ type: "session_start", prompt });
+  }
+
   let iterations = iterOffset;
   let status: "complete" | "incomplete" = "incomplete";
 
-  // Writer function — routes output through the status bar if active
-  const writeOutput = bar
-    ? (text: string) => bar!.write(text)
-    : (text: string) => {
-        deps.writeStdout(text);
-      };
+  // Writer function — routes output through renderer or raw passthrough
+  const writeOutput = renderer
+    ? (text: string) => renderer!.feedChunk(text)
+    : bar
+      ? (text: string) => bar!.write(text)
+      : (text: string) => {
+          deps.writeStdout(text);
+        };
 
   try {
     for (let i = 1; i <= maxIter; i++) {
@@ -182,6 +212,12 @@ export async function runSessionWithDeps(
 
       if (output.includes(DONE_TOKEN)) {
         status = "complete";
+        renderer?.flush();
+        renderer?.onEvent({
+          type: "session_end",
+          iterations: totalIter,
+          status: "complete",
+        });
         bar?.stop();
         bar = null;
         opts.onComplete?.(totalIter);
@@ -190,12 +226,19 @@ export async function runSessionWithDeps(
     }
 
     if (status !== "complete") {
+      renderer?.flush();
+      renderer?.onEvent({
+        type: "session_end",
+        iterations,
+        status: "incomplete",
+      });
       bar?.stop();
       bar = null;
       opts.onMaxReached?.(totalMax);
     }
   } finally {
     bar?.stop();
+    renderer?.cleanup();
     deps.cleanupAgent(agent);
   }
 
@@ -214,9 +257,9 @@ export async function runSessionWithDeps(
 }
 
 /**
- * Run a single opencode invocation. Streams output through the provided
- * writer function and appends to a log file. Throws if the subprocess
- * exits with a non-zero code.
+ * Run a single opencode invocation. Streams structured JSON output through
+ * the provided writer function and appends raw JSONL to a log file.
+ * Throws if the subprocess exits with a non-zero code.
  */
 async function runOpencode(
   bin: string,
@@ -227,7 +270,7 @@ async function runOpencode(
   write: (text: string) => void
 ): Promise<string> {
   const proc = Bun.spawn(
-    [bin, "run", "--agent", agentName, "--model", model, prompt],
+    [bin, "run", "--format", "json", "--agent", agentName, "--model", model, prompt],
     {
       stdout: "pipe",
       stderr: "inherit",

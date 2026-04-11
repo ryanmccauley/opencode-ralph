@@ -1,5 +1,5 @@
-import { describe, test, expect } from "bun:test";
-import { parsePositiveInt, validatePositiveInt } from "../tui/helpers.js";
+import { describe, test, expect, jest, spyOn, afterEach } from "bun:test";
+import { parsePositiveInt, validatePositiveInt, createRunCallbacks } from "../tui/helpers.js";
 
 describe("parsePositiveInt", () => {
   test("parses valid positive integers", () => {
@@ -35,5 +35,55 @@ describe("validatePositiveInt", () => {
     expect(validatePositiveInt("-1")).toBe("Enter a positive number");
     expect(validatePositiveInt("abc")).toBe("Enter a positive number");
     expect(validatePositiveInt(undefined)).toBe("Enter a positive number");
+  });
+});
+
+describe("createRunCallbacks", () => {
+  test("useRenderer=true returns no-op callbacks", () => {
+    const spy = spyOn(console, "log");
+    const callbacks = createRunCallbacks(true);
+
+    callbacks.onComplete!(5);
+    callbacks.onMaxReached!(10);
+
+    // Should not log anything when renderer handles display
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  test("useRenderer=false logs on complete", () => {
+    const spy = spyOn(console, "log");
+    const callbacks = createRunCallbacks(false);
+
+    callbacks.onComplete!(3);
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    const loggedText = spy.mock.calls[0][0] as string;
+    expect(loggedText).toContain("complete");
+    expect(loggedText).toContain("3");
+    expect(loggedText).toContain("iterations");
+    spy.mockRestore();
+  });
+
+  test("useRenderer=false logs on max reached", () => {
+    const spy = spyOn(console, "log");
+    const callbacks = createRunCallbacks(false);
+
+    callbacks.onMaxReached!(50);
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    const loggedText = spy.mock.calls[0][0] as string;
+    expect(loggedText).toContain("incomplete");
+    expect(loggedText).toContain("50");
+    spy.mockRestore();
+  });
+
+  test("defaults to useRenderer=true", () => {
+    const spy = spyOn(console, "log");
+    const callbacks = createRunCallbacks();
+
+    callbacks.onComplete!(1);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
   });
 });

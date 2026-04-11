@@ -53,20 +53,31 @@ export async function selectModel(
  * Note: onIteration is intentionally omitted — the status bar handles
  * iteration display when active, and omitting it avoids noisy log lines
  * when the bar is disabled too.
+ *
+ * @param useRenderer - When true, session-end display is handled by the
+ *   TreeRenderer. When false, callbacks log directly to console.
  */
-export function createRunCallbacks(): Pick<
+export function createRunCallbacks(useRenderer = true): Pick<
   RunOptions,
   "onComplete" | "onMaxReached"
 > {
+  if (useRenderer) {
+    return {
+      onComplete(_iterations) {
+        // Session end is rendered by the TreeRenderer via session_end event.
+      },
+      onMaxReached(_max) {
+        // Session end is rendered by the TreeRenderer via session_end event.
+      },
+    };
+  }
+
   return {
     onComplete(iterations) {
-      console.log(`\n[complete: ${iterations} iterations]`);
+      console.log(`\ncomplete, ${iterations} ${iterations === 1 ? "iteration" : "iterations"}`);
     },
     onMaxReached(max) {
-      console.log(`\n[max iterations reached: ${max}]`);
-      console.log(
-        "  the agent may not have finished. re-run or increase --max-iter."
-      );
+      console.log(`\nincomplete, max iterations reached (${max})`);
     },
   };
 }
