@@ -2,14 +2,16 @@
 // Floating footer pinned to the bottom of the terminal during a session.
 // Uses ANSI scroll regions so agent output scrolls above the bar.
 //
-// Layout without input (bottom 2 lines):
-//   ───────────────────────────────────────────────────────
-//    iter 2/50  ·  3m 42s  ·  anthropic/claude-sonnet-4  ·  thinking: high
+// Layout without input (bottom 3 lines):
+//   ╭──────────────────────────────────────────────────────────────────────────╮
+//   │  iter 2/50  ·  3m 42s                 anthropic/claude-sonnet-4  ·  high │
+//   ╰──────────────────────────────────────────────────────────────────────────╯
 //
-// Layout with input enabled (bottom 3 lines):
-//   ───────────────────────────────────────────────────────
-//    iter 2/50  ·  3m 42s  ·  anthropic/claude-sonnet-4  ·  thinking: high
-//    > type feedback here...
+// Layout with input enabled (bottom 4 lines):
+//   ╭──────────────────────────────────────────────────────────────────────────╮
+//   │  iter 2/50  ·  3m 42s                 anthropic/claude-sonnet-4  ·  high │
+//   │  > type feedback here...                                                 │
+//   ╰──────────────────────────────────────────────────────────────────────────╯
 
 import { styleText } from "node:util";
 
@@ -41,6 +43,17 @@ const hideCursor = () => `${ESC}?25l`;
 
 /** Show cursor. */
 const showCursor = () => `${ESC}?25h`;
+
+// ─── Box-drawing characters ─────────────────────────────────────────────────
+
+const BOX = {
+  topLeft: "\u256d",     // ╭
+  topRight: "\u256e",    // ╮
+  bottomLeft: "\u2570",  // ╰
+  bottomRight: "\u256f", // ╯
+  horizontal: "\u2500",  // ─
+  vertical: "\u2502",    // │
+} as const;
 
 // ─── Time formatting ─────────────────────────────────────────────────────────
 
@@ -76,6 +89,22 @@ export interface StatusBarInfo {
 }
 
 /**
+ * Render the footer content parts (without ANSI positioning or styling).
+ * Returns left-aligned progress info and right-aligned config info.
+ * Exported for testing.
+ */
+export function renderFooterParts(
+  info: StatusBarInfo,
+  nowMs: number
+): { left: string; right: string } {
+  const elapsed = formatElapsed(nowMs - info.startTime);
+  return {
+    left: `iter ${info.iteration}/${info.maxIter}  \u00b7  ${elapsed}`,
+    right: `${info.model}  \u00b7  ${info.thinking}`,
+  };
+}
+
+/**
  * Render the footer content string (without ANSI positioning).
  * Exported for testing.
  */
@@ -87,19 +116,13 @@ export function renderFooter(info: StatusBarInfo): string {
  * Render footer using an injected timestamp (for deterministic tests).
  */
 export function renderFooterAtTime(info: StatusBarInfo, nowMs: number): string {
-  const elapsed = formatElapsed(nowMs - info.startTime);
-  const parts = [
-    `iter ${info.iteration}/${info.maxIter}`,
-    elapsed,
-    info.model,
-    `thinking: ${info.thinking}`,
-  ];
-  return ` ${parts.join("  \u00b7  ")}`;
+  const { left, right } = renderFooterParts(info, nowMs);
+  return `  ${left}    ${right}  `;
 }
 
 // ─── Minimum terminal height to enable the bar ──────────────────────────────
 
-const MIN_ROWS = 5;
+const MIN_ROWS = 6;
 
 // ─── StatusBar class ─────────────────────────────────────────────────────────
 
@@ -132,9 +155,13 @@ export class StatusBar {
     this.enableInput = opts.enableInput ?? false;
   }
 
-  /** Number of terminal lines reserved at the bottom. */
+  /**
+   * Number of terminal lines reserved at the bottom.
+   * Without input: 3 (top border + info + bottom border)
+   * With input:    4 (top border + info + input + bottom border)
+   */
   private get reservedLines(): number {
-    return this.enableInput ? 3 : 2;
+    return this.enableInput ? 4 : 3;
   }
 
   /** Whether the status bar is currently active (scroll region set). */
@@ -198,10 +225,8 @@ export class StatusBar {
       return;
     }
 
-    // Save cursor, move to bottom of scroll region, restore after write
-    // Actually: the scroll region already confines output. We just need to
-    // make sure the cursor is inside the scroll region before writing.
-    // The cursor should already be there, so just write directly.
+    // The scroll region already confines output. The cursor should
+    // already be inside the scroll region, so just write directly.
     process.stdout.write(text);
   }
 
@@ -240,7 +265,7 @@ export class StatusBar {
   // ─── Private ─────────────────────────────────────────────────────────────
 
   private applyScrollRegion(): void {
-    // Scroll region: lines 1 to (rows - reservedLines) — reserves bottom lines
+    // Scroll region: lines 1 to (rows - reservedLines)
     const scrollBottom = this.rows - this.reservedLines;
     process.stdout.write(
       saveCursor() +
@@ -252,38 +277,69 @@ export class StatusBar {
   private draw(): void {
     if (!this.active) return;
 
-    const info: StatusBarInfo = {
-      iteration: this.iteration,
-      maxIter: this.maxIter,
-      model: this.model,
-      thinking: this.thinking,
-      startTime: this.startTime,
-    };
+    const innerWidth = Math.max(0, this.cols - 2); // cols minus │ on each side
 
-    // With input: separator at rows-2, footer at rows-1, input at rows
-    // Without:    separator at rows-1, footer at rows
-    const separatorRow = this.rows - this.reservedLines + 1;
-    const footerRow = separatorRow + 1;
+    // ─── Build box borders ─────────────────────────────────────────────
+    const topBorder =
+      BOX.topLeft + BOX.horizontal.repeat(innerWidth) + BOX.topRight;
+    const bottomBorder =
+      BOX.bottomLeft + BOX.horizontal.repeat(innerWidth) + BOX.bottomRight;
 
-    const separator = "\u2500".repeat(this.cols);
-    const content = renderFooter(info);
+    // ─── Build info line with Layout D: left progress, right config ────
+    const nowMs = Date.now();
+    const elapsed = formatElapsed(nowMs - this.startTime);
 
-    // Truncate content if wider than terminal
-    const displayContent =
-      content.length > this.cols ? content.slice(0, this.cols) : content;
+    // Plain-text segments for width calculation
+    const leftText = `  iter ${this.iteration}/${this.maxIter}  \u00b7  ${elapsed}`;
+    const rightText = `${this.model}  \u00b7  ${this.thinking}  `;
+    const gap = Math.max(2, innerWidth - leftText.length - rightText.length);
 
+    // Styled segments: dim labels/separators, normal values
+    const leftStyled =
+      "  " +
+      styleText("dim", "iter ") +
+      styleText("bold", `${this.iteration}/${this.maxIter}`) +
+      styleText("dim", "  \u00b7  ") +
+      styleText("bold", elapsed);
+
+    const rightStyled =
+      this.model +
+      styleText("dim", "  \u00b7  ") +
+      this.thinking +
+      "  ";
+
+    const infoLine =
+      BOX.vertical + leftStyled + " ".repeat(gap) + rightStyled + BOX.vertical;
+
+    // ─── Row positions ─────────────────────────────────────────────────
+    const topRow = this.rows - this.reservedLines + 1;
+    const infoRow = topRow + 1;
+    // inputRow and bottomRow depend on enableInput
+    const bottomRow = this.rows;
+
+    // ─── Assemble output ───────────────────────────────────────────────
     let output =
       saveCursor() +
       hideCursor() +
-      moveTo(separatorRow, 1) +
+      moveTo(topRow, 1) +
       clearLine() +
-      styleText("dim", separator) +
-      moveTo(footerRow, 1) +
+      styleText("dim", topBorder) +
+      moveTo(infoRow, 1) +
       clearLine() +
-      displayContent;
+      infoLine;
 
     if (this.enableInput) {
-      output += this.renderInputLine();
+      const inputRow = infoRow + 1;
+      output += this.renderInputLine(inputRow, innerWidth);
+      output +=
+        moveTo(bottomRow, 1) +
+        clearLine() +
+        styleText("dim", bottomBorder);
+    } else {
+      output +=
+        moveTo(bottomRow, 1) +
+        clearLine() +
+        styleText("dim", bottomBorder);
     }
 
     output += restoreCursor() + showCursor();
@@ -291,40 +347,50 @@ export class StatusBar {
   }
 
   /**
-   * Render just the input line without touching separator/footer.
+   * Render just the input line without touching borders/info.
    * Used for responsive keystroke feedback.
    */
   private drawInput(): void {
     if (!this.active || !this.enableInput) return;
 
+    const innerWidth = Math.max(0, this.cols - 2);
+    const inputRow = this.rows - this.reservedLines + 3; // topRow+2
+
     process.stdout.write(
       saveCursor() +
       hideCursor() +
-      this.renderInputLine() +
+      this.renderInputLine(inputRow, innerWidth) +
       restoreCursor() +
       showCursor()
     );
   }
 
   /**
-   * Build the ANSI sequence for the input line (no save/restore cursor).
+   * Build the ANSI sequence for the input line inside the box.
    * Used by both draw() and drawInput().
    */
-  private renderInputLine(): string {
-    const inputRow = this.rows;
+  private renderInputLine(row: number, innerWidth: number): string {
     const prompt = "> ";
-    const maxLen = this.cols - prompt.length;
-    // Show the tail of the buffer if it exceeds terminal width
+    const padding = 2; // left margin inside box
+    const maxLen = innerWidth - padding - prompt.length;
+    // Show the tail of the buffer if it exceeds available width
     const display =
       this.inputBuffer.length > maxLen
         ? this.inputBuffer.slice(-maxLen)
         : this.inputBuffer;
 
+    const contentLen = padding + prompt.length + display.length;
+    const trailingSpace = Math.max(0, innerWidth - contentLen);
+
     return (
-      moveTo(inputRow, 1) +
+      moveTo(row, 1) +
       clearLine() +
+      styleText("dim", BOX.vertical) +
+      " ".repeat(padding) +
       styleText("dim", prompt) +
-      display
+      display +
+      " ".repeat(trailingSpace) +
+      styleText("dim", BOX.vertical)
     );
   }
 
