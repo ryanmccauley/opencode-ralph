@@ -6,7 +6,10 @@
     "dev": "bun run src/index.ts",
     "build": "bun build src/index.ts --compile --outfile bin/ralph",
     "check": "tsc --noEmit",
-    "test": "bun test"
+    "test": "bun test",
+    "test:smoke": "bun test src/__tests__/types.test.ts src/__tests__/helpers.test.ts src/__tests__/status-bar.test.ts",
+    "test:regression": "bun test",
+    "test:watch": "bun test --watch"
   },
   "dependencies": {
     "@clack/prompts": "^1.2.0",

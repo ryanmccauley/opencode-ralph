@@ -84,6 +84,13 @@ export function formatWarn(treePrefix: string, message: string): string {
 }
 
 /**
+ * Format a feedback-received line.
+ */
+export function formatFeedback(message: string): string {
+  return `\n${BASE_INDENT}[feedback] ${message}\n`;
+}
+
+/**
  * Format an error line (shown as tool output).
  */
 export function formatError(continuation: string, message: string): string {
@@ -214,6 +221,9 @@ export class TreeRenderer {
         break;
       case "warn":
         this.handleWarn(event.message);
+        break;
+      case "feedback_received":
+        this.handleFeedback(event.feedback);
         break;
       case "session_end":
         this.handleSessionEnd(event.status, event.iterations);
@@ -396,6 +406,11 @@ export class TreeRenderer {
   private handleWarn(message: string): void {
     const prefix = this.tree.prefix(false);
     this.writeln(formatWarn(prefix, message));
+  }
+
+  private handleFeedback(feedback: string): void {
+    // Feedback renders outside the tree structure, similar to text
+    this.writer.write(formatFeedback(feedback));
   }
 
   private handleText(text: string): void {

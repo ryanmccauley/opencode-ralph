@@ -2,6 +2,10 @@
 // Runs the opencode agent loop, detects done token, logs output.
 // Uses `opencode run --format json` for structured event output and feeds
 // events through the tree renderer for formatted display.
+//
+// Supports mid-session user feedback: when enabled, the user can type feedback
+// in a prompt at the bottom of the terminal. Submitting feedback aborts the
+// current iteration and injects the feedback into the next iteration's prompt.
 
 import { mkdirSync } from "fs";
 import { setupAgent, cleanupAgent } from "./agent.js";
@@ -15,6 +19,22 @@ import { getSessionsDir } from "./config.js";
 import { DONE_TOKEN } from "../types.js";
 import { StatusBar, canShowStatusBar } from "../tui/status-bar.js";
 import { TreeRenderer, type RendererWriter } from "../tui/renderer.js";
+import {
+  FeedbackQueue,
+  RawInputHandler,
+  type FeedbackQueueLike,
+  type InputHandlerLike,
+  type InputStatusBar,
+} from "../tui/feedback.js";
+
+// ─── Result type for runOpencode ─────────────────────────────────────────────
+
+export interface RunResult {
+  output: string;
+  aborted: boolean;
+}
+
+// ─── Options & interfaces ────────────────────────────────────────────────────
 
 export interface RunOptions {
   model: string;
@@ -28,6 +48,9 @@ export interface RunOptions {
   showStatusBar?: boolean;
   /** Whether to use the tree renderer for structured output (default: true). */
   useRenderer?: boolean;
+  /** Whether to enable mid-session feedback input (default: true).
+   *  Only effective when the status bar is also enabled and stdin is a TTY. */
+  enableFeedback?: boolean;
 
   // ─── Resume fields ──────────────────────────────────────────────────────
   /** Existing session ID to resume. When set, reuses the session's log and
@@ -50,6 +73,7 @@ export interface StatusBarLike {
   stop(): void;
   setIteration(current: number): void;
   write(text: string): void;
+  setInputBuffer(text: string): void;
 }
 
 export interface RendererLike {
@@ -65,8 +89,9 @@ type RunOpencodeFn = (
   model: string,
   prompt: string,
   logPath: string,
-  write: (text: string) => void
-) => Promise<string>;
+  write: (text: string) => void,
+  signal?: AbortSignal
+) => Promise<RunResult>;
 
 export interface RunnerDeps {
   setupAgent: typeof setupAgent;
@@ -81,8 +106,14 @@ export interface RunnerDeps {
     model: string;
     thinking: string;
     maxIter: number;
+    enableInput?: boolean;
   }) => StatusBarLike;
   createRenderer: (writer: RendererWriter) => RendererLike;
+  createFeedbackQueue: () => FeedbackQueueLike;
+  createInputHandler: (
+    bar: InputStatusBar,
+    queue: FeedbackQueueLike
+  ) => InputHandlerLike;
   runOpencode: RunOpencodeFn;
   mkdirSync: typeof mkdirSync;
   writeStdout: (text: string) => void;
@@ -103,6 +134,12 @@ const DEFAULT_RUNNER_DEPS: RunnerDeps = {
   },
   createRenderer(writer: RendererWriter) {
     return new TreeRenderer({ writer });
+  },
+  createFeedbackQueue() {
+    return new FeedbackQueue();
+  },
+  createInputHandler(bar: InputStatusBar, queue: FeedbackQueueLike) {
+    return new RawInputHandler(bar, queue);
   },
   runOpencode,
   mkdirSync,
@@ -147,6 +184,7 @@ export async function runSessionWithDeps(
 
   const useStatusBar = (opts.showStatusBar ?? true) && deps.canShowStatusBar();
   const useRenderer = opts.useRenderer ?? true;
+  const useFeedback = (opts.enableFeedback ?? true) && useStatusBar;
 
   const agent = deps.setupAgent(variantConfig ?? null);
   const opencodeBin = await deps.findOpencodeBin();
@@ -156,8 +194,22 @@ export async function runSessionWithDeps(
   const totalMax = iterOffset + maxIter;
   let bar: StatusBarLike | null = null;
   if (useStatusBar) {
-    bar = deps.createStatusBar({ model, thinking, maxIter: totalMax });
+    bar = deps.createStatusBar({
+      model,
+      thinking,
+      maxIter: totalMax,
+      enableInput: useFeedback,
+    });
     bar.start();
+  }
+
+  // Set up feedback queue and input handler
+  let feedbackQueue: FeedbackQueueLike | null = null;
+  let inputHandler: InputHandlerLike | null = null;
+  if (useFeedback && bar) {
+    feedbackQueue = deps.createFeedbackQueue();
+    inputHandler = deps.createInputHandler(bar, feedbackQueue);
+    inputHandler.start();
   }
 
   // Set up the tree renderer for structured output
@@ -193,24 +245,57 @@ export async function runSessionWithDeps(
       }
       opts.onIteration?.(totalIter, totalMax);
 
+      // Create an AbortController for this iteration.
+      // The input handler will signal it when the user submits feedback.
+      const abortController = new AbortController();
+      if (inputHandler) {
+        inputHandler.setAbortController(abortController);
+      }
+
+      // Drain any pending feedback (from a previous abort)
+      const feedback = feedbackQueue?.drain() ?? null;
+
       // When resuming, every iteration is a continuation (the original
       // prompt was already sent in the first run). For new sessions,
-      // only iteration 1 sends the raw prompt.
-      const iterPrompt =
-        !isResume && i === 1
-          ? prompt
-          : `Continue working on the following task. Check the current state of the codebase and pick up where you left off: ${prompt}`;
+      // only iteration 1 sends the raw prompt (and only when there's no
+      // feedback queued — if the user somehow has feedback already, we
+      // use the continuation prompt so the feedback is included).
+      const isFirstNewIteration = !isResume && i === 1 && !feedback;
+      let iterPrompt: string;
 
-      const output = await deps.runOpencode(
+      if (isFirstNewIteration) {
+        iterPrompt = prompt;
+      } else {
+        const feedbackSection = feedback
+          ? `\nUser feedback during session:\n${feedback}\n\n`
+          : "";
+        iterPrompt = `${feedbackSection}Continue working on the following task. Check the current state of the codebase and pick up where you left off: ${prompt}`;
+      }
+
+      // Emit feedback event for the renderer so it shows in the tree output
+      if (feedback && renderer) {
+        renderer.onEvent({ type: "feedback_received", feedback });
+      }
+
+      const result = await deps.runOpencode(
         opencodeBin,
         agent.agentName,
         model,
         iterPrompt,
         logPath,
-        writeOutput
+        writeOutput,
+        abortController.signal
       );
 
-      if (output.includes(DONE_TOKEN)) {
+      if (result.aborted) {
+        // User submitted feedback — the iteration was killed.
+        // Flush any partial output and continue to the next iteration
+        // which will include the queued feedback in its prompt.
+        renderer?.flush();
+        continue;
+      }
+
+      if (result.output.includes(DONE_TOKEN)) {
         status = "complete";
         renderer?.flush();
         renderer?.onEvent({
@@ -220,6 +305,8 @@ export async function runSessionWithDeps(
         });
         bar?.stop();
         bar = null;
+        inputHandler?.stop();
+        inputHandler = null;
         opts.onComplete?.(totalIter);
         break;
       }
@@ -234,10 +321,13 @@ export async function runSessionWithDeps(
       });
       bar?.stop();
       bar = null;
+      inputHandler?.stop();
+      inputHandler = null;
       opts.onMaxReached?.(totalMax);
     }
   } finally {
     bar?.stop();
+    inputHandler?.stop();
     renderer?.cleanup();
     deps.cleanupAgent(agent);
   }
@@ -259,7 +349,12 @@ export async function runSessionWithDeps(
 /**
  * Run a single opencode invocation. Streams structured JSON output through
  * the provided writer function and appends raw JSONL to a log file.
- * Throws if the subprocess exits with a non-zero code.
+ *
+ * Supports an optional AbortSignal to allow killing the subprocess
+ * mid-execution (used by the feedback system to abort the current iteration).
+ *
+ * Returns { output, aborted } where `aborted` is true if the signal fired.
+ * Throws if the subprocess exits with a non-zero code (unless aborted).
  */
 async function runOpencode(
   bin: string,
@@ -267,8 +362,9 @@ async function runOpencode(
   model: string,
   prompt: string,
   logPath: string,
-  write: (text: string) => void
-): Promise<string> {
+  write: (text: string) => void,
+  signal?: AbortSignal
+): Promise<RunResult> {
   const proc = Bun.spawn(
     [bin, "run", "--format", "json", "--agent", agentName, "--model", model, prompt],
     {
@@ -277,6 +373,13 @@ async function runOpencode(
     }
   );
 
+  let aborted = false;
+  const onAbort = () => {
+    aborted = true;
+    proc.kill();
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
+
   let output = "";
   const decoder = new TextDecoder();
   const reader = proc.stdout.getReader();
@@ -284,23 +387,29 @@ async function runOpencode(
   // Open the log file for appending
   const logFd = Bun.file(logPath).writer();
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    const text = decoder.decode(value);
-    output += text;
-    write(text);
-    logFd.write(text);
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const text = decoder.decode(value);
+      output += text;
+      write(text);
+      logFd.write(text);
+    }
+  } catch (err) {
+    // Read errors after abort are expected (stream closed)
+    if (!aborted) throw err;
   }
 
+  signal?.removeEventListener("abort", onAbort);
   logFd.end();
 
   const exitCode = await proc.exited;
-  if (exitCode !== 0) {
+  if (exitCode !== 0 && !aborted) {
     throw new Error(`opencode exited with code ${exitCode}`);
   }
 
-  return output;
+  return { output, aborted };
 }
 
 /**

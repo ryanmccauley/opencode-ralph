@@ -2,9 +2,14 @@
 // Floating footer pinned to the bottom of the terminal during a session.
 // Uses ANSI scroll regions so agent output scrolls above the bar.
 //
-// Layout (bottom 2 lines of terminal):
+// Layout without input (bottom 2 lines):
 //   ───────────────────────────────────────────────────────
 //    iter 2/50  ·  3m 42s  ·  anthropic/claude-sonnet-4  ·  thinking: high
+//
+// Layout with input enabled (bottom 3 lines):
+//   ───────────────────────────────────────────────────────
+//    iter 2/50  ·  3m 42s  ·  anthropic/claude-sonnet-4  ·  thinking: high
+//    > type feedback here...
 
 import { styleText } from "node:util";
 
@@ -102,12 +107,15 @@ export interface StatusBarOptions {
   model: string;
   thinking: string;
   maxIter: number;
+  /** When true, reserve an extra line for the feedback input prompt. */
+  enableInput?: boolean;
 }
 
 export class StatusBar {
   private model: string;
   private thinking: string;
   private maxIter: number;
+  private enableInput: boolean;
   private iteration = 0;
   private startTime = 0;
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -115,11 +123,18 @@ export class StatusBar {
   private cols = 0;
   private active = false;
   private onResize: (() => void) | null = null;
+  private inputBuffer = "";
 
   constructor(opts: StatusBarOptions) {
     this.model = opts.model;
     this.thinking = opts.thinking;
     this.maxIter = opts.maxIter;
+    this.enableInput = opts.enableInput ?? false;
+  }
+
+  /** Number of terminal lines reserved at the bottom. */
+  private get reservedLines(): number {
+    return this.enableInput ? 3 : 2;
   }
 
   /** Whether the status bar is currently active (scroll region set). */
@@ -141,7 +156,7 @@ export class StatusBar {
 
     this.active = true;
 
-    // Set scroll region to exclude the bottom 2 lines
+    // Set scroll region to exclude the bottom reserved lines
     this.applyScrollRegion();
     this.draw();
 
@@ -198,22 +213,35 @@ export class StatusBar {
     if (!this.active) return;
     this.teardown();
 
-    // Move cursor below where the footer was, then clear those lines
-    const footerRow = this.rows - 1;
+    // Clear all reserved lines at the bottom
+    const firstReservedRow = this.rows - this.reservedLines + 1;
+    let clearSeq = "";
+    for (let r = firstReservedRow; r <= this.rows; r++) {
+      clearSeq += moveTo(r, 1) + clearLine();
+    }
+
     process.stdout.write(
-      moveTo(footerRow, 1) + clearLine() +
-      moveTo(footerRow + 1, 1) + clearLine() +
+      clearSeq +
       resetScrollRegion() +
-      moveTo(footerRow, 1) +
+      moveTo(firstReservedRow, 1) +
       showCursor()
     );
+  }
+
+  /**
+   * Update the input line buffer and redraw just the input line.
+   * Called by the RawInputHandler on each keystroke.
+   */
+  setInputBuffer(text: string): void {
+    this.inputBuffer = text;
+    if (this.active && this.enableInput) this.drawInput();
   }
 
   // ─── Private ─────────────────────────────────────────────────────────────
 
   private applyScrollRegion(): void {
-    // Scroll region: lines 1 to (rows - 2) — reserves bottom 2 lines
-    const scrollBottom = this.rows - 2;
+    // Scroll region: lines 1 to (rows - reservedLines) — reserves bottom lines
+    const scrollBottom = this.rows - this.reservedLines;
     process.stdout.write(
       saveCursor() +
       setScrollRegion(1, scrollBottom) +
@@ -232,8 +260,10 @@ export class StatusBar {
       startTime: this.startTime,
     };
 
-    const separatorRow = this.rows - 1;
-    const footerRow = this.rows;
+    // With input: separator at rows-2, footer at rows-1, input at rows
+    // Without:    separator at rows-1, footer at rows
+    const separatorRow = this.rows - this.reservedLines + 1;
+    const footerRow = separatorRow + 1;
 
     const separator = "\u2500".repeat(this.cols);
     const content = renderFooter(info);
@@ -242,7 +272,7 @@ export class StatusBar {
     const displayContent =
       content.length > this.cols ? content.slice(0, this.cols) : content;
 
-    process.stdout.write(
+    let output =
       saveCursor() +
       hideCursor() +
       moveTo(separatorRow, 1) +
@@ -250,9 +280,51 @@ export class StatusBar {
       styleText("dim", separator) +
       moveTo(footerRow, 1) +
       clearLine() +
-      displayContent +
+      displayContent;
+
+    if (this.enableInput) {
+      output += this.renderInputLine();
+    }
+
+    output += restoreCursor() + showCursor();
+    process.stdout.write(output);
+  }
+
+  /**
+   * Render just the input line without touching separator/footer.
+   * Used for responsive keystroke feedback.
+   */
+  private drawInput(): void {
+    if (!this.active || !this.enableInput) return;
+
+    process.stdout.write(
+      saveCursor() +
+      hideCursor() +
+      this.renderInputLine() +
       restoreCursor() +
       showCursor()
+    );
+  }
+
+  /**
+   * Build the ANSI sequence for the input line (no save/restore cursor).
+   * Used by both draw() and drawInput().
+   */
+  private renderInputLine(): string {
+    const inputRow = this.rows;
+    const prompt = "> ";
+    const maxLen = this.cols - prompt.length;
+    // Show the tail of the buffer if it exceeds terminal width
+    const display =
+      this.inputBuffer.length > maxLen
+        ? this.inputBuffer.slice(-maxLen)
+        : this.inputBuffer;
+
+    return (
+      moveTo(inputRow, 1) +
+      clearLine() +
+      styleText("dim", prompt) +
+      display
     );
   }
 

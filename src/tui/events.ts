@@ -44,6 +44,11 @@ export interface Warn {
   message: string;
 }
 
+export interface FeedbackReceived {
+  type: "feedback_received";
+  feedback: string;
+}
+
 export interface SessionEnd {
   type: "session_end";
   iterations: number;
@@ -58,4 +63,5 @@ export type RenderEvent =
   | ToolEnd
   | TextContent
   | Warn
+  | FeedbackReceived
   | SessionEnd;

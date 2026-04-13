@@ -164,7 +164,10 @@ Settings are saved to `$RALPH_HOME/config`. Session metadata is stored as JSON i
 bun install          # install deps
 bun run dev          # run from source
 bun run check        # type-check
+bun run test:smoke   # fast smoke suite for quick feedback
 bun test             # run tests
+bun run test:watch   # watch mode while iterating
+bun run test:regression # full regression suite
 bun run build        # compile binary to bin/ralph
 ```
 

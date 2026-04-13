@@ -157,6 +157,30 @@ export function toYaml(value: unknown, indent: number = 0): string {
   return String(value);
 }
 
+// ─── Agent installation ─────────────────────────────────────────────────────
+
+/**
+ * Ensure ralph.md is installed in the opencode agents directory.
+ * Reads from the external file if found, otherwise uses embedded defaults.
+ * This is idempotent — safe to call multiple times.
+ */
+function ensureAgentInstalled(): void {
+  const targetPath = join(OC_AGENTS_DIR, "ralph.md");
+
+  const externalFile = findAgentFile();
+  let content: string;
+
+  if (externalFile) {
+    content = readFileSync(externalFile, "utf-8");
+  } else {
+    const frontmatter = toYaml(DEFAULT_FRONTMATTER, 0);
+    content = `---\n${frontmatter}\n---\n${DEFAULT_BODY}`;
+  }
+
+  mkdirSync(OC_AGENTS_DIR, { recursive: true });
+  writeFileSync(targetPath, content, "utf-8");
+}
+
 export interface AgentSetup {
   agentName: string;
   tmpFile: string | null;
@@ -164,13 +188,16 @@ export interface AgentSetup {
 
 /**
  * Set up the agent for a run.
- * If variantConfig is provided, creates a temp agent file with the variant
- * config merged into the *real* frontmatter from ralph.md (so permission,
- * temperature, etc. changes in ralph.md are always honoured).
+ * Always installs ralph.md into the opencode agents directory so opencode
+ * can find it. If variantConfig is provided, also creates a temp agent file
+ * with the variant config merged into the frontmatter.
  */
 export function setupAgent(
   variantConfig: Record<string, unknown> | null
 ): AgentSetup {
+  // Always ensure the base agent file is installed
+  ensureAgentInstalled();
+
   if (!variantConfig) {
     return { agentName: "ralph", tmpFile: null };
   }

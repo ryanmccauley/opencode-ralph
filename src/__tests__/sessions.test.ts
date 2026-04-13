@@ -9,7 +9,7 @@ import {
   listSessions,
   getLogPath,
 } from "../core/sessions.js";
-import type { SessionMeta } from "../types.js";
+import { buildSessionMeta } from "./session-fixtures.js";
 
 describe("generateSessionId", () => {
   test("matches expected format: YYYY-MM-DD_HHMMSS_xxxx", () => {
@@ -47,15 +47,14 @@ describe("session storage", () => {
     const sessionsDir = makeTempSessionsDir();
     const sessionId = generateSessionId();
 
-    const meta: SessionMeta = {
+    const meta = buildSessionMeta({
       timestamp: sessionId,
       model: "anthropic/claude-sonnet-4",
       thinking: "high",
-      maxIter: 50,
       prompt: "Fix all failing tests",
       status: "incomplete",
       iterations: 23,
-    };
+    });
 
     await saveSessionMeta(meta, { sessionsDir });
     const loaded = await getSessionMeta(sessionId, { sessionsDir });
@@ -69,15 +68,15 @@ describe("session storage", () => {
     const sessionId = generateSessionId();
     const prompt = "Fix these issues:\n1. Auth bug\n2. CSS layout\n3. API timeout";
 
-    const meta: SessionMeta = {
+    const meta = buildSessionMeta({
       timestamp: sessionId,
       model: "openai/gpt-4o",
       thinking: "off",
-      maxIter: 10,
       prompt,
       status: "complete",
       iterations: 5,
-    };
+      maxIter: 10,
+    });
 
     await saveSessionMeta(meta, { sessionsDir });
     const loaded = await getSessionMeta(sessionId, { sessionsDir });
@@ -90,22 +89,22 @@ describe("session storage", () => {
     const sessionsDir = makeTempSessionsDir();
     const sessionId = generateSessionId();
 
-    const original: SessionMeta = {
+    const original = buildSessionMeta({
       timestamp: sessionId,
       model: "anthropic/claude-sonnet-4",
       thinking: "off",
-      maxIter: 50,
       prompt: "Do the thing",
       status: "incomplete",
       iterations: 50,
-    };
+      maxIter: 50,
+    });
 
-    const resumed: SessionMeta = {
+    const resumed = buildSessionMeta({
       ...original,
       maxIter: 70,
       status: "complete",
       iterations: 63,
-    };
+    });
 
     await saveSessionMeta(original, { sessionsDir });
     await saveSessionMeta(resumed, { sessionsDir });
@@ -117,7 +116,7 @@ describe("session storage", () => {
   test("listSessions returns saved sessions newest-first by filename", async () => {
     const sessionsDir = makeTempSessionsDir();
 
-    const older: SessionMeta = {
+    const older = buildSessionMeta({
       timestamp: "2026-04-01_010101_abcd",
       model: "provider/one",
       thinking: "off",
@@ -125,8 +124,8 @@ describe("session storage", () => {
       prompt: "older",
       status: "incomplete",
       iterations: 2,
-    };
-    const newer: SessionMeta = {
+    });
+    const newer = buildSessionMeta({
       timestamp: "2026-04-02_010101_wxyz",
       model: "provider/two",
       thinking: "high",
@@ -134,7 +133,7 @@ describe("session storage", () => {
       prompt: "newer",
       status: "complete",
       iterations: 7,
-    };
+    });
 
     await saveSessionMeta(older, { sessionsDir });
     await saveSessionMeta(newer, { sessionsDir });
@@ -150,29 +149,33 @@ describe("session storage", () => {
     const sessionsDir = makeTempSessionsDir();
     const sessionId = "2026-04-08_143022_a7x3";
 
+    const legacy = buildSessionMeta({
+      timestamp: sessionId,
+      prompt: "legacy prompt",
+      status: "complete",
+      iterations: 9,
+    });
+
     const legacyBody = [
-      `timestamp=${sessionId}`,
-      "model=openai/gpt-4o",
-      "thinking=off",
-      "max_iter=50",
-      "prompt=legacy prompt",
-      "status=complete",
-      "iterations=9",
+      `timestamp=${legacy.timestamp}`,
+      `model=${legacy.model}`,
+      `thinking=${legacy.thinking}`,
+      `max_iter=${legacy.maxIter}`,
+      `prompt=${legacy.prompt}`,
+      `status=${legacy.status}`,
+      `iterations=${legacy.iterations}`,
       "",
     ].join("\n");
 
     await Bun.write(join(sessionsDir, `${sessionId}.meta`), legacyBody);
 
     const loaded = await getSessionMeta(sessionId, { sessionsDir });
-    expect(loaded).toEqual({
+    expect(loaded).toEqual(buildSessionMeta({
       timestamp: sessionId,
-      model: "openai/gpt-4o",
-      thinking: "off",
-      maxIter: 50,
       prompt: "legacy prompt",
       status: "complete",
       iterations: 9,
-    });
+    }));
   });
 
   test("getLogPath respects overridden sessions dir", () => {
