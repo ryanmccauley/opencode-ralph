@@ -1,197 +1,127 @@
 # opencode-ralph
 
-An [OpenCode](https://opencode.ai) agent that works autonomously until the task is done.
+Ralph as a native OpenCode agent plus plugin loop.
 
-## What it does
+## What it is
 
-Ralph is a custom OpenCode agent that solves the "stops after each step" problem. It:
+This package turns Ralph into an OpenCode plugin instead of a standalone TUI.
 
-- **Loops autonomously** -- re-invokes the agent until it signals completion with `<ralph>DONE</ralph>`
-- **Keeps going** until the task is complete instead of pausing for confirmation
-- **Runs tests, fixes errors, re-runs** in a loop without asking "should I continue?"
-- **Interactive TUI** with fuzzy model search, dynamic thinking variants, session history
-- **Discovers models dynamically** from your connected OpenCode providers via the SDK
+It keeps the OpenCode experience intact:
 
-## Install
+- use `@file` mentions in normal prompts
+- use `Esc` to stop the current run
+- stay in the same OpenCode session
+- use OpenCode's native model picker, history, undo, redo, and sharing
 
-### Build from source
+The plugin adds Ralph's outer loop on top of a normal OpenCode `ralph` agent.
 
-Requires [Bun](https://bun.sh) v1.3+.
+## Current status
+
+This branch is the first plugin-first implementation. It includes:
+
+- native `ralph` agent config injection
+- same-session automatic continuation loop
+- persistent Ralph session state in `.opencode/ralph-state.json`
+- `ralph_complete` tool for explicit completion
+- `ralph_wait` tool for intentional pauses
+- control commands:
+  - `/ralph-limit`
+  - `/ralph-pause`
+  - `/ralph-resume`
+  - `/ralph-status`
+
+## Install for local development
+
+Add the plugin to your OpenCode config:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["/absolute/path/to/opencode-ralph"]
+}
+```
+
+Then build it:
 
 ```bash
-git clone https://github.com/ryanmccauley/opencode-ralph.git
-cd opencode-ralph
 bun install
-bun build --compile --outfile bin/ralph src/index.ts
+bun run build
 ```
 
-Add the binary to your PATH:
-
-```bash
-cp bin/ralph /usr/local/bin/ralph
-# or symlink it
-ln -s "$(pwd)/bin/ralph" /usr/local/bin/ralph
-```
-
-### Agent file
-
-The `ralph.md` agent definition is bundled. Place it next to the binary or in your working directory -- the tool finds it automatically.
+OpenCode will load the plugin package and inject the `ralph` agent automatically.
 
 ## Usage
 
-### Interactive TUI (no arguments)
+1. Switch to the `ralph` agent.
+2. Optionally set a limit:
 
-```bash
-ralph
+```text
+/ralph-limit 20
 ```
 
-Opens the interactive menu where you can:
+3. Send a normal prompt:
 
-- **New session** -- pick a model (fuzzy search), choose a thinking variant, set max iterations, enter your prompt
-- **Recent sessions** -- browse past sessions, view logs, resume incomplete sessions
-- **Settings** -- set default model, thinking variant, and max iterations
-- **Refresh models** -- force-refresh the model cache from OpenCode
-
-### CLI mode (with a prompt)
-
-```bash
-ralph "Fix all failing tests"
-
-ralph -m openrouter/anthropic/claude-opus-4.6 "Refactor the auth module"
-
-ralph --thinking high "Solve this complex bug"
-
-ralph --max-iter 5 "Add input validation to the API"
-
-ralph --once "Explain the auth flow"
-
-ralph --resume abc123_x7k "Keep going for 10 more iterations"
-
-ralph --resume abc123_x7k --max-iter 20 "Continue with higher limit"
+```text
+Fix @src/api/auth.ts and make the failing auth tests pass.
 ```
 
-### Flags
+If the agent does not signal completion, Ralph continues in the same session automatically.
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-m, --model` | saved default or interactive | Model to use (provider/model-id) |
-| `--thinking` | `off` | Thinking variant name (e.g. `low`, `high`, `max`) |
-| `--max-iter` | `50` (or `$RALPH_MAX_ITER`) | Maximum loop iterations |
-| `--once` | off | Run once without looping |
-| `--resume <id>` | off | Resume an incomplete session for additional iterations |
-| `--no-status` | off | Disable the floating status bar |
-| `--refresh` | off | Force-refresh the model cache |
-| `--tui` | auto | Open the interactive TUI |
-| `-h, --help` | | Show help |
+## Commands
 
-### Environment variables
+### `/ralph-limit <n>`
 
-| Variable | Description |
-|----------|-------------|
-| `RALPH_MODEL` | Default model (overridden by `-m`) |
-| `RALPH_MAX_ITER` | Default max iterations (overridden by `--max-iter`) |
-| `RALPH_HOME` | Data directory (default: `~/.ralph`) |
+Set the Ralph iteration budget for the current session.
 
-### Config precedence
+### `/ralph-pause`
 
-Settings are resolved highest-wins: **CLI flags > env vars > saved config file > defaults**.
+Pause the current Ralph run.
 
-## How the loop works
+### `/ralph-resume [n]`
 
-Each `opencode run` invocation is a fresh subprocess -- Ralph has no access to OpenCode's internal conversation history. Ralph handles persistence across iterations:
+Resume the paused Ralph run. If `n` is supplied, Ralph uses that iteration limit.
 
-1. **Iteration 1** (new session): Sends your original prompt to the agent
-2. **Iteration 2+**: Sends a continuation prompt: "Continue working on the following task. Check the current state of the codebase and pick up where you left off: \<original prompt\>"
-3. **After each iteration**: Checks the agent's output for `<ralph>DONE</ralph>`
-4. **If found**: Marks the session as complete and exits successfully
-5. **If not found**: Starts the next iteration (up to `--max-iter`)
+### `/ralph-status`
 
-If `opencode` exits with a non-zero code, the session stops immediately with an error.
+Show the current Ralph run status.
 
-### Resuming sessions
+## Completion behavior
 
-If a session hit its iteration limit without completing, you can resume it:
+Ralph should call `ralph_complete` when the task is fully complete and verified.
 
-- **TUI**: Select the session in the session browser and choose "Resume". You'll be prompted for how many additional iterations to run.
-- **CLI**: Use `--resume <session-id>`. The `--max-iter` flag controls how many *additional* iterations to run (default: 50).
+For migration safety, the plugin also still recognizes `<ralph>DONE</ralph>` if it appears in assistant output.
 
-When resuming, every iteration uses the continuation prompt (never the raw prompt), and the existing session's metadata and log file are updated in-place -- no new session is created. The iteration counter continues from where it left off.
+## Stop behavior
 
-## Model discovery
+The intended behavior is:
 
-Ralph uses the [OpenCode SDK](https://www.npmjs.com/package/@opencode-ai/sdk) to dynamically discover all models from your connected providers. Nothing is hardcoded -- model lists, thinking variants, and provider configs all come from OpenCode at runtime.
+- `Esc` aborts the current OpenCode turn
+- Ralph treats that as a pause
+- Ralph does not auto-resume until you explicitly resume it
 
-Models are cached to `$RALPH_HOME/models.cache.json` with a 1-hour TTL for fast startup. Use `--refresh` or the "Refresh models" menu option to update.
+This implementation listens for `MessageAbortedError` to detect user aborts.
 
-## Thinking variants
+## State
 
-Thinking/reasoning levels are discovered per-model from OpenCode's variant system. Different providers expose different variants:
+Ralph stores session loop state in:
 
-| Provider | Example variants |
-|----------|-----------------|
-| OpenRouter | `none`, `minimal`, `low`, `medium`, `high`, `xhigh` |
-| Anthropic | `low`, `high`, `max` |
-| GitHub Copilot | `low`, `medium`, `high` |
-| Google | `high`, `max` |
+```text
+.opencode/ralph-state.json
+```
 
-The variant config objects are passed through directly to the AI SDK -- no translation layer.
-
-## Permissions
-
-By default Ralph has full autonomy:
-
-| Tool | Permission |
-|------|-----------|
-| `edit` | `allow` -- no prompts on file changes |
-| `bash` | `allow` -- runs shell commands without prompts |
-| `webfetch` | `allow` -- fetches URLs without prompts |
-
-To customize, edit `ralph.md` and adjust the `permission` block. Changes to `ralph.md` are honoured even when thinking variants are active -- the full frontmatter is read and the variant config is merged in. See the [OpenCode permissions docs](https://opencode.ai/docs/permissions/).
-
-## Configuration
-
-Settings are saved to `$RALPH_HOME/config`. Session metadata is stored as JSON in `$RALPH_HOME/sessions/`.
-
-| Setting | Value | Why |
-|---------|-------|-----|
-| `mode` | `primary` | Tab-switchable in TUI |
-| `temperature` | `0.7` | Balanced creativity |
-| `edit: allow` | No approval pauses | Core fix for the "stops each step" problem |
+This stores only lightweight loop metadata, not full transcripts.
 
 ## Development
 
 ```bash
-bun install          # install deps
-bun run dev          # run from source
-bun run check        # type-check
-bun run test:smoke   # fast smoke suite for quick feedback
-bun test             # run tests
-bun run test:watch   # watch mode while iterating
-bun run test:regression # full regression suite
-bun run build        # compile binary to bin/ralph
+bun install
+bun run check
+bun test
+bun run build
 ```
 
-## Project structure
+## Notes
 
-```
-src/
-  index.ts           # CLI parsing + TUI/CLI mode router
-  types.ts           # Shared types (ModelInfo, Config, SessionMeta)
-  core/
-    agent.ts         # Agent .md file generation with variant config
-    config.ts        # Config load/save ($RALPH_HOME/config)
-    models.ts        # SDK model discovery + caching + fuzzy search
-    opencode.ts      # Binary lookup + dev-server lifecycle
-    runner.ts        # opencode run subprocess loop
-    sessions.ts      # Session metadata storage (JSON)
-  tui/
-    helpers.ts       # Shared TUI components (model picker, callbacks)
-    menu.ts          # Main menu loop
-    new-session.ts   # New session flow (model -> thinking -> prompt)
-    sessions.ts      # Session browser
-    settings.ts      # Settings editor
-    status-bar.ts    # Floating footer (iteration, elapsed time, model, thinking)
-    theme.ts         # Styling helpers
-  __tests__/         # Unit tests
-ralph.md             # Agent definition file
-```
+- The public OpenCode plugin API does not expose custom native TUI panels, so Ralph uses the normal OpenCode UI.
+- The plugin uses `promptAsync()` continuations in the same session.
+- Continuation prompts are marked synthetic so the UX stays as close to stock OpenCode as possible.
