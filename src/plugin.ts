@@ -402,6 +402,10 @@ export const RalphPlugin: Plugin = async (ctx: any) => {
             .describe("Optional short completion summary."),
         },
         async execute(args, context) {
+          if (context.agent !== RALPH_AGENT_NAME) {
+            return "This tool can only be called by the Ralph agent.";
+          }
+
           store.update(context.sessionID, (session) => {
             if (!session.run) return session;
             session.run.sawCompletion = true;
@@ -426,6 +430,10 @@ export const RalphPlugin: Plugin = async (ctx: any) => {
             .describe("Concise reason the Ralph agent needs user input."),
         },
         async execute(args, context) {
+          if (context.agent !== RALPH_AGENT_NAME) {
+            return "This tool can only be called by the Ralph agent.";
+          }
+
           store.update(context.sessionID, (session) => {
             if (!session.run) return session;
             session.run.status = "paused";
